@@ -537,9 +537,9 @@ if st.sidebar.button("Scan Stocks"):
                 "Double Top": detect_double_top(df),
                 "Double Bottom": detect_double_bottom(df),
                 "Cup and Handle": detect_cup_and_handle(df),
-                # "Ascending Triangle": detect_ascending_triangle(df),
-                # "Descending Triangle": detect_descending_triangle(df),
-                # "Symmetrical Triangle": detect_symmetrical_triangle(df),
+                "Ascending Triangle": detect_ascending_triangle(df),
+                "Descending Triangle": detect_descending_triangle(df),
+                "Symmetrical Triangle": detect_symmetrical_triangle(df),
             }
             
             # Print detected patterns for debugging
