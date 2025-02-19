@@ -14,15 +14,22 @@ if 'selected_pattern' not in st.session_state:
     st.session_state.selected_pattern = None
 
 def fetch_stock_data(symbol, start_date, end_date):
-    stock = yf.Ticker(symbol)
-    df = stock.history(start=start_date, end=end_date)
-    print(f"Fetched data for {symbol} from {start_date} to {end_date}:")
-    print(df)
-    df.reset_index(inplace=True)
-    if not df.empty:
-        df = calculate_moving_average(df)  # Add Moving Average
-        df = calculate_rsi(df)  # Add RSI
-    return df if not df.empty else None
+    try:
+        stock = yf.Ticker(symbol)
+        df = stock.history(start=start_date, end=end_date)
+        if df.empty:
+            print(f"No data found for {symbol} from {start_date} to {end_date}.")
+        else:
+            print(f"Fetched data for {symbol} from {start_date} to {end_date}:")
+            print(df)
+        df.reset_index(inplace=True)
+        if not df.empty:
+            df = calculate_moving_average(df)  # Add Moving Average
+            df = calculate_rsi(df)  # Add RSI
+        return df if not df.empty else None
+    except Exception as e:
+        print(f"Error fetching data for {symbol}: {e}")
+        return None
 
 def find_extrema(df, order=5):
     peaks = argrelextrema(df['Close'].values, np.greater, order=order)[0]
