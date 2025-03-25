@@ -8,6 +8,7 @@ from tqdm import tqdm
 from plotly.subplots import make_subplots
 import datetime
 from sklearn.linear_model import LinearRegression
+import time
 
 # Set page configuration
 st.set_page_config(
@@ -23,6 +24,10 @@ st.markdown("""
     .main .block-container {
         padding-top: 1rem;
         padding-bottom: 1rem;
+    }
+    div[data-testid="stProgress"] div[role="progressbar"] {
+            border-radius: 10px; /* Adjust for more rounding */
+            height: 15px !important; /* Adjust height */
     }
     h1, h2, h3 {
         font-weight: 600;
@@ -101,8 +106,8 @@ if 'settings' not in st.session_state:
     }
 
 @st.cache_data(ttl=3600)  # Cache for 1 hour
-def fetch_stock_data_cached(symbol, start_date, end_date, forecast_days):
-    return fetch_stock_data(symbol, start_date, end_date, forecast_days)
+def fetch_stock_data_cached(symbol, start_date, end_date):
+    return fetch_stock_data(symbol, start_date, end_date)
 
 @st.cache_data
 def load_stock_symbols():
@@ -115,7 +120,7 @@ def load_stock_symbols():
     
     
 
-def fetch_stock_data(symbol, start_date, end_date, forecast_days=30):
+def fetch_stock_data(symbol, start_date, end_date):
     try:
         # Convert dates to string format for yfinance
         start_str = start_date.strftime('%Y-%m-%d')
@@ -139,7 +144,7 @@ def fetch_stock_data(symbol, start_date, end_date, forecast_days=30):
             df = df.ffill().bfill()
             
         # Forecast and indicators
-        df = forecast_future_prices(df, forecast_days)
+        # df = forecast_future_prices(df, forecast_days)
         df = calculate_moving_average(df)
         df = calculate_rsi(df)
         
@@ -169,362 +174,535 @@ def find_extrema(df, order=5):
     troughs = argrelextrema(df['Close'].values, np.less, order=order)[0]
     return peaks, troughs
 
-# def detect_head_and_shoulders(df):
-#     prices = df['Close']
-#     peaks = argrelextrema(prices.values, np.greater, order=10)[0]
-#     patterns = []
+import numpy as np
+from sklearn.linear_model import LinearRegression
+import pandas as pd
 
-#     for i in range(len(peaks) - 2):
-#         LS, H, RS = peaks[i], peaks[i + 1], peaks[i + 2]
+import numpy as np
+from sklearn.linear_model import LinearRegression
+import pandas as pd
 
-#         # Check if the head is higher than the shoulders
-#         if prices.iloc[H] > prices.iloc[LS] and prices.iloc[H] > prices.iloc[RS]:
-#             # Check if the shoulders are roughly equal (within 5% tolerance)
-#             shoulder_diff = abs(prices.iloc[LS] - prices.iloc[RS]) / max(prices.iloc[LS], prices.iloc[RS])
-#             if shoulder_diff <= 0.05:  # 5% tolerance
-#                 # Find neckline (troughs between shoulders and head)
-#                 T1 = prices.iloc[LS:H + 1].idxmin()  # Trough between left shoulder and head
-#                 T2 = prices.iloc[H:RS + 1].idxmin()  # Trough between head and right shoulder
-#                 patterns.append({
-#                     "left_shoulder": LS,
-#                     "head": H,
-#                     "right_shoulder": RS,
-#                     "neckline": (T1, T2)
-#                 })
-
-#     return patterns
-
-# ================SIR2
-def find_peaks(data):
-    """Find all peaks in the close price data with additional smoothing."""
+def find_peaks(data, min_change=0.005):
+    """
+    Loosened peak detection: only checks immediate neighbors with a smaller min_change.
+    """
     peaks = []
-    for i in range(2, len(data) - 2):  # Extended window for better peak detection
-        if (data['Close'].iloc[i] > data['Close'].iloc[i-1] and 
-            data['Close'].iloc[i] > data['Close'].iloc[i+1] and
-            data['Close'].iloc[i] > data['Close'].iloc[i-2] and  # Additional checks
-            data['Close'].iloc[i] > data['Close'].iloc[i+2]):
+    for i in range(1, len(data) - 1):  # Reduced window from 2 to 1
+        if (data['Close'].iloc[i] > data['Close'].iloc[i-1] * (1 + min_change) and 
+            data['Close'].iloc[i] > data['Close'].iloc[i+1] * (1 + min_change)):
             peaks.append(i)
     return peaks
 
-def find_valleys(data):
-    """Find all valleys in the close price data with additional smoothing."""
+def find_valleys(data, min_change=0.005):
+    """
+    Loosened valley detection: only checks immediate neighbors with a smaller min_change.
+    """
     valleys = []
-    for i in range(2, len(data) - 2):  # Extended window for better valley detection
-        if (data['Close'].iloc[i] < data['Close'].iloc[i-1] and 
-            data['Close'].iloc[i] < data['Close'].iloc[i+1] and
-            data['Close'].iloc[i] < data['Close'].iloc[i-2] and  # Additional checks
-            data['Close'].iloc[i] < data['Close'].iloc[i+2]):
+    for i in range(1, len(data) - 1):  # Reduced window from 2 to 1
+        if (data['Close'].iloc[i] < data['Close'].iloc[i-1] * (1 - min_change) and 
+            data['Close'].iloc[i] < data['Close'].iloc[i+1] * (1 - min_change)):
             valleys.append(i)
     return valleys
 
-def detect_head_and_shoulders(data, tolerance=0.03, min_pattern_length=20, volume_ratio=1.2):
-    """
-    Enhanced Head & Shoulders detection with:
-    - Volume analysis
-    - Trend confirmation
-    - Neckline validation
-    - Breakout confirmation
-    """
-    peaks = find_peaks(data)
-    valleys = find_valleys(data)
+def detect_head_and_shoulders(data, 
+                              is_inverse=False,
+                              tolerance=0.15,              # Loosened from 0.08
+                              min_pattern_length=5,        # Loosened from 8
+                              volume_ratio_head=1.1,       # Loosened from 1.2
+                              volume_ratio_breakout=1.05,  # Loosened from 1.1
+                              time_symmetry_threshold=0.8, # Loosened from 0.5
+                              neckline_slope_threshold=0.01, # Loosened from 0.005
+                              min_trend_strength=0.0001,   # Loosened from 0.0005
+                              breakout_lookahead=15,
+                              breakout_confirmation_bars=1): # Loosened from 2
+    peaks = find_peaks(data) if not is_inverse else find_valleys(data)
+    valleys = find_valleys(data) if not is_inverse else find_peaks(data)
     patterns = []
     
-    for i in range(len(peaks) - 2):
-        LS, H, RS = peaks[i], peaks[i+1], peaks[i+2]
+    if len(peaks) < 3:
+        return patterns
+    
+    for i in range(1, len(peaks) - 1):
+        LS, H, RS = peaks[i-1], peaks[i], peaks[i+1]
         
-        # 1. Basic structure validation
-        if not (data['Close'].iloc[LS] < data['Close'].iloc[H] > data['Close'].iloc[RS]):
-            continue
-            
-        # 2. Shoulder symmetry (price)
+        # Basic structure check (unchanged)
+        if not is_inverse:
+            if not (data['Close'].iloc[LS] < data['Close'].iloc[H] > data['Close'].iloc[RS]):
+                continue
+        else:
+            if not (data['Close'].iloc[LS] > data['Close'].iloc[H] < data['Close'].iloc[RS]):
+                continue
+        
+        # Shoulder symmetry (looser tolerance)
         shoulder_diff = abs(data['Close'].iloc[LS] - data['Close'].iloc[RS]) / max(data['Close'].iloc[LS], data['Close'].iloc[RS])
         if shoulder_diff > tolerance:
             continue
-            
-        # 3. Time symmetry
-        time_diff = abs((H - LS) - (RS - H)) / max(H - LS, RS - H)
-        if time_diff > 0.3:  # Allow 30% time difference
+        
+        # Time symmetry (looser threshold)
+        left_time = H - LS
+        right_time = RS - H
+        time_diff = abs(left_time - right_time) / max(left_time, right_time)
+        if time_diff > time_symmetry_threshold:
             continue
-            
-        # 4. Minimum pattern duration
+        
+        # Minimum pattern duration (looser)
         if (RS - LS) < min_pattern_length:
             continue
-            
-        # 5. Neckline points
-        valley1 = min([v for v in valleys if LS < v < H], key=lambda x: data['Close'].iloc[x], default=None)
-        valley2 = min([v for v in valleys if H < v < RS], key=lambda x: data['Close'].iloc[x], default=None)
-        if not valley1 or not valley2:
-            continue
-            
-        # 6. Neckline slope validation
-        neckline_slope = (data['Close'].iloc[valley2] - data['Close'].iloc[valley1]) / (valley2 - valley1)
-        if abs(neckline_slope) > 0.001:  # Filter steep necklines
-            continue
-            
-        # 7. Volume analysis
-        # Left shoulder advance volume
-        left_advance_vol = data['Volume'].iloc[valley1+1:H+1].mean()
-        # Right shoulder advance volume
-        right_advance_vol = data['Volume'].iloc[valley2+1:RS+1].mean()
-        # Head advance volume
-        head_advance_vol = data['Volume'].iloc[valley1+1:H+1].mean()
         
-        if not (head_advance_vol > left_advance_vol * volume_ratio and 
-                right_advance_vol < head_advance_vol):
+        # Find neckline points
+        valley1 = data['Close'].iloc[LS:H].idxmin() if not is_inverse else data['Close'].iloc[LS:H].idxmax()
+        valley2 = data['Close'].iloc[H:RS].idxmin() if not is_inverse else data['Close'].iloc[H:RS].idxmax()
+        T1 = data.index.get_loc(valley1)
+        T2 = data.index.get_loc(valley2)
+        
+        if pd.isna(valley1) or pd.isna(valley2):
             continue
-            
-        # 8. Prior uptrend validation
-        lookback = (RS - LS) // 2
-        X = np.arange(max(0, LS-lookback), LS).reshape(-1, 1)
-        y = data['Close'].iloc[max(0, LS-lookback):LS]
-        if LinearRegression().fit(X, y).coef_[0] <= 0:
+        
+        # Neckline slope (looser threshold)
+        neckline_slope = (data['Close'].iloc[T2] - data['Close'].iloc[T1]) / (T2 - T1)
+        if abs(neckline_slope) > neckline_slope_threshold:
             continue
-            
-        # 9. Breakout confirmation
-        neckline_at_break = data['Close'].iloc[valley1] + neckline_slope * (RS - valley1)
+        
+        # Volume analysis (looser ratios, optional)
+        if 'Volume' in data.columns:
+            head_vol = data['Volume'].iloc[H]
+            left_vol = data['Volume'].iloc[LS]
+            right_vol = data['Volume'].iloc[RS]
+            avg_prior_vol = data['Volume'].iloc[max(0, LS-10):LS].mean()
+            vol_head_ok = head_vol > avg_prior_vol * volume_ratio_head or head_vol > right_vol  # OR instead of AND
+        else:
+            vol_head_ok = True
+        
+        # Prior trend validation (looser, optional)
+        trend_lookback = min(30, LS)
+        if trend_lookback >= 5:  # Only check if enough data
+            X = np.arange(LS - trend_lookback, LS).reshape(-1, 1)
+            y = data['Close'].iloc[LS - trend_lookback:LS].values
+            trend_coef = LinearRegression().fit(X, y).coef_[0]
+            if (not is_inverse and trend_coef < min_trend_strength) or (is_inverse and trend_coef > -min_trend_strength):
+                continue
+        else:
+            trend_coef = 0  # Skip trend check if too little data
+        
+        # Breakout detection (looser, optional)
+        neckline_at_rs = data['Close'].iloc[T1] + neckline_slope * (RS - T1)
         breakout_confirmed = False
         breakout_idx = None
+        throwback_low_idx = None
+        pullback_high_idx = None
         
-        for j in range(RS, min(RS + 20, len(data) - 2)):  # Check next 20 candles
-            if all(data['Close'].iloc[j+k] < neckline_at_break for k in range(3)):  # 3 consecutive closes
+        for j in range(RS, min(RS + breakout_lookahead, len(data) - breakout_confirmation_bars)):
+            prices = data['Close'].iloc[j:j + breakout_confirmation_bars]
+            vols = data['Volume'].iloc[j:j + breakout_confirmation_bars] if 'Volume' in data.columns else [1]
+            neckline_at_j = data['Close'].iloc[T1] + neckline_slope * (j - T1)
+            
+            if (not is_inverse and all(p < neckline_at_j for p in prices)) or \
+               (is_inverse and all(p > neckline_at_j for p in prices)):
+                if 'Volume' in data.columns:
+                    avg_breakout_vol = vols.mean()
+                    if avg_breakout_vol < avg_prior_vol * volume_ratio_breakout:
+                        continue
+                breakout_idx = j
                 breakout_confirmed = True
-                breakout_idx = j + 2
                 break
-                
-        if not breakout_confirmed:
-            continue
-            
-        # 10. Breakout volume check
-        if data['Volume'].iloc[breakout_idx] < data['Volume'].iloc[RS] * 0.8:  # Should have decent volume
-            continue
-            
-        # Calculate pattern metrics
-        pattern_height = data['Close'].iloc[H] - neckline_at_break
-        target_price = neckline_at_break - pattern_height
         
-        patterns.append({
+        # V-formation and Pullback High (unchanged, optional)
+        if breakout_confirmed:
+            v_search_range = min(breakout_idx + breakout_lookahead, len(data))
+            v_prices = data['Close'].iloc[breakout_idx:v_search_range]
+            throwback_low_idx = v_prices.idxmin() if not is_inverse else v_prices.idxmax()
+            throwback_low_idx = data.index.get_loc(throwback_low_idx)
+            pullback_prices = data['Close'].iloc[throwback_low_idx:v_search_range]
+            pullback_high_idx = pullback_prices.idxmax() if not is_inverse else pullback_prices.idxmin()
+            pullback_high_idx = data.index.get_loc(pullback_high_idx)
+            neckline_at_pullback = data['Close'].iloc[T1] + neckline_slope * (pullback_high_idx - T1)
+            v_confirmed = (not is_inverse and pullback_prices.max() >= neckline_at_pullback * 0.98) or \
+                          (is_inverse and pullback_prices.min() <= neckline_at_pullback * 1.02)
+        else:
+            v_confirmed = False
+        
+        # Pattern metrics
+        neckline_at_break = data['Close'].iloc[T1] + neckline_slope * (breakout_idx - T1) if breakout_idx else neckline_at_rs
+        pattern_height = abs(data['Close'].iloc[H] - neckline_at_break)
+        target_price = (neckline_at_break - pattern_height) if not is_inverse else (neckline_at_break + pattern_height)
+        neckline_end_idx = pullback_high_idx if v_confirmed and pullback_high_idx else (breakout_idx if breakout_confirmed else RS)
+        neckline_at_end = data['Close'].iloc[T1] + neckline_slope * (neckline_end_idx - T1)
+        
+        # Loosened confidence calculation
+        confidence = min(0.99,
+                        (1 - (shoulder_diff / tolerance)) * 0.25 +  # Reduced weight
+                        (1 - (time_diff / time_symmetry_threshold)) * 0.15 +  # Reduced weight
+                        (min(1, abs(trend_coef) * 1000)) * 0.2 +  # Looser scaling
+                        (0.2 if vol_head_ok else 0.15) +  # Smaller penalty
+                        (0.2 if breakout_confirmed else 0.05) +  # Smaller penalty for no breakout
+                        (0.15 if v_confirmed else 0))  # Smaller bonus
+        
+        pattern_data = {
             'left_shoulder': data.index[LS],
             'head': data.index[H],
             'right_shoulder': data.index[RS],
-            'neckline_points': (data.index[valley1], data.index[valley2]),
-            'neckline_price': neckline_at_break,
-            'breakout_point': data.index[breakout_idx],
+            'neckline_points': (data.index[T1], data.index[T2]),
+            'breakout_point': data.index[breakout_idx] if breakout_idx else None,
+            'throwback_low': data.index[throwback_low_idx] if throwback_low_idx else None,
+            'pullback_high': data.index[pullback_high_idx] if pullback_high_idx else None,
+            'neckline_end': data.index[neckline_end_idx],
+            'neckline_price': neckline_at_end,
             'target_price': target_price,
             'pattern_height': pattern_height,
-            'confidence': min(0.99, (1 - shoulder_diff) * (1 - time_diff))
-        })
+            'confidence': confidence,
+            'status': 'confirmed' if breakout_confirmed else 'forming',
+            'type': 'standard' if not is_inverse else 'inverse'
+        }
+        patterns.append(pattern_data)
     
-    return sorted(patterns, key=lambda x: -x['confidence'])  # Return sorted by confidence
+    return sorted(patterns, key=lambda x: -x['confidence'])
 
-def plot_head_and_shoulders(df, patterns):
+#     """Find all peaks in the close price data with additional smoothing."""
+#     peaks = []
+#     for i in range(2, len(data) - 2):  # Extended window for better peak detection
+#         if (data['Close'].iloc[i] > data['Close'].iloc[i-1] and 
+#             data['Close'].iloc[i] > data['Close'].iloc[i+1] and
+#             data['Close'].iloc[i] > data['Close'].iloc[i-2] and  # Additional checks
+#             data['Close'].iloc[i] > data['Close'].iloc[i+2]):
+#             peaks.append(i)
+#     return peaks
+
+# def find_valleys(data):
+#     """Find all valleys in the close price data with additional smoothing."""
+#     valleys = []
+#     for i in range(2, len(data) - 2):  # Extended window for better valley detection
+#         if (data['Close'].iloc[i] < data['Close'].iloc[i-1] and 
+#             data['Close'].iloc[i] < data['Close'].iloc[i+1] and
+#             data['Close'].iloc[i] < data['Close'].iloc[i-2] and  # Additional checks
+#             data['Close'].iloc[i] < data['Close'].iloc[i+2]):
+#             valleys.append(i)
+#     return valleys
+
+# def detect_head_and_shoulders(data, tolerance=0.03, min_pattern_length=20, volume_ratio=1.2):
+#     """
+#     Enhanced Head & Shoulders detection with:
+#     - Volume analysis
+#     - Trend confirmation
+#     - Neckline validation
+#     - Breakout confirmation
+#     """
+#     peaks = find_peaks(data)
+#     valleys = find_valleys(data)
+#     patterns = []
+    
+#     for i in range(len(peaks) - 2):
+#         LS, H, RS = peaks[i], peaks[i+1], peaks[i+2]
+        
+#         # 1. Basic structure validation
+#         if not (data['Close'].iloc[LS] < data['Close'].iloc[H] > data['Close'].iloc[RS]):
+#             continue
+            
+#         # 2. Shoulder symmetry (price)
+#         shoulder_diff = abs(data['Close'].iloc[LS] - data['Close'].iloc[RS]) / max(data['Close'].iloc[LS], data['Close'].iloc[RS])
+#         if shoulder_diff > tolerance:
+#             continue
+            
+#         # 3. Time symmetry
+#         time_diff = abs((H - LS) - (RS - H)) / max(H - LS, RS - H)
+#         if time_diff > 0.3:  # Allow 30% time difference
+#             continue
+            
+#         # 4. Minimum pattern duration
+#         if (RS - LS) < min_pattern_length:
+#             continue
+            
+#         # 5. Neckline points
+#         valley1 = min([v for v in valleys if LS < v < H], key=lambda x: data['Close'].iloc[x], default=None)
+#         valley2 = min([v for v in valleys if H < v < RS], key=lambda x: data['Close'].iloc[x], default=None)
+#         if not valley1 or not valley2:
+#             continue
+            
+#         # 6. Neckline slope validation
+#         neckline_slope = (data['Close'].iloc[valley2] - data['Close'].iloc[valley1]) / (valley2 - valley1)
+#         if abs(neckline_slope) > 0.001:  # Filter steep necklines
+#             continue
+            
+#         # 7. Volume analysis
+#         # Left shoulder advance volume
+#         left_advance_vol = data['Volume'].iloc[valley1+1:H+1].mean()
+#         # Right shoulder advance volume
+#         right_advance_vol = data['Volume'].iloc[valley2+1:RS+1].mean()
+#         # Head advance volume
+#         head_advance_vol = data['Volume'].iloc[valley1+1:H+1].mean()
+        
+#         if not (head_advance_vol > left_advance_vol * volume_ratio and 
+#                 right_advance_vol < head_advance_vol):
+#             continue
+            
+#         # 8. Prior uptrend validation
+#         lookback = (RS - LS) // 2
+#         X = np.arange(max(0, LS-lookback), LS).reshape(-1, 1)
+#         y = data['Close'].iloc[max(0, LS-lookback):LS]
+#         if LinearRegression().fit(X, y).coef_[0] <= 0:
+#             continue
+            
+#         # 9. Breakout confirmation
+#         neckline_at_break = data['Close'].iloc[valley1] + neckline_slope * (RS - valley1)
+#         breakout_confirmed = False
+#         breakout_idx = None
+        
+#         for j in range(RS, min(RS + 20, len(data) - 2)):  # Check next 20 candles
+#             if all(data['Close'].iloc[j+k] < neckline_at_break for k in range(3)):  # 3 consecutive closes
+#                 breakout_confirmed = True
+#                 breakout_idx = j + 2
+#                 break
+                
+#         if not breakout_confirmed:
+#             continue
+            
+#         # 10. Breakout volume check
+#         if data['Volume'].iloc[breakout_idx] < data['Volume'].iloc[RS] * 0.8:  # Should have decent volume
+#             continue
+            
+#         # Calculate pattern metrics
+#         pattern_height = data['Close'].iloc[H] - neckline_at_break
+#         target_price = neckline_at_break - pattern_height
+        
+#         patterns.append({
+#             'left_shoulder': data.index[LS],
+#             'head': data.index[H],
+#             'right_shoulder': data.index[RS],
+#             'neckline_points': (data.index[valley1], data.index[valley2]),
+#             'neckline_price': neckline_at_break,
+#             'breakout_point': data.index[breakout_idx],
+#             'target_price': target_price,
+#             'pattern_height': pattern_height,
+#             'confidence': min(0.99, (1 - shoulder_diff) * (1 - time_diff))
+#         })
+    
+#     return sorted(patterns, key=lambda x: -x['confidence'])  # Return sorted by confidence
+
+def plot_head_and_shoulders(df, patterns, stock_name=""):
     fig = make_subplots(
         rows=3, cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.03,
-        row_heights=[0.6, 0.2, 0.2],
+        vertical_spacing=0.05,
+        row_heights=[0.65, 0.2, 0.15],
         specs=[[{"type": "scatter"}], [{"type": "bar"}], [{"type": "scatter"}]]
     )
 
-    # Add price line
+    # Price line
     fig.add_trace(go.Scatter(
         x=df['Date'], y=df['Close'],
         mode='lines', name='Price', line=dict(color="#1E88E5", width=2),
-        hoverinfo='x+y',
-        hovertemplate='Date: %{x}<br>Price: %{y:.2f}<extra></extra>'
+        hoverinfo='x+y', hovertemplate='Date: %{x}<br>Price: %{y:.2f}<extra></extra>'
     ), row=1, col=1)
 
+    # Moving average (optional)
     if 'MA' in df.columns:
         fig.add_trace(go.Scatter(
             x=df['Date'], y=df['MA'],
-            mode='lines', name="MA (50)", line=dict(color="#FB8C00", width=1.5),
-            hoverinfo='x+y',
-            hovertemplate='Date: %{x}<br>MA: %{y:.2f}<extra></extra>'
+            mode='lines', name="MA (50)", line=dict(color="#FFB300", width=1.5),
+            hoverinfo='x+y', hovertemplate='Date: %{x}<br>MA: %{y:.2f}<extra></extra>'
         ), row=1, col=1)
 
+    pattern_colors = ['#FF5252', '#4CAF50', '#673AB7', '#FBC02D', '#0288D1']
+
     for i, pattern in enumerate(patterns):
-        LS, H, RS = pattern["left_shoulder"], pattern["head"], pattern["right_shoulder"]
-        T1, T2 = pattern["neckline"]
-        
         try:
-            # Get all required price points
+            # Extract key points
+            LS = pattern["left_shoulder"]
+            H = pattern["head"]
+            RS = pattern["right_shoulder"]
+            T1, T2 = pattern["neckline_points"]
+            breakout_point = pattern.get("breakout_point")
+            throwback_low = pattern.get("throwback_low")
+            pullback_high = pattern.get("pullback_high")
+            neckline_end = pattern["neckline_end"]
+
+            # Convert to indices
+            ls_idx = df.index.get_loc(LS)
+            h_idx = df.index.get_loc(H)
+            rs_idx = df.index.get_loc(RS)
+            t1_idx = df.index.get_loc(T1)
+            t2_idx = df.index.get_loc(T2)
+            breakout_idx = df.index.get_loc(breakout_point) if breakout_point else None
+            throwback_low_idx = df.index.get_loc(throwback_low) if throwback_low else None
+            pullback_high_idx = df.index.get_loc(pullback_high) if pullback_high else None
+            neckline_end_idx = df.index.get_loc(neckline_end)
+
+            # Validate sequence
+            if not (ls_idx < t1_idx < h_idx < t2_idx < rs_idx):
+                print(f"Pattern {i}: Invalid sequence - LS: {ls_idx}, T1: {t1_idx}, H: {h_idx}, T2: {t2_idx}, RS: {rs_idx}")
+                continue
+
+            # Get prices
             ls_price = df.loc[LS, 'Close']
             h_price = df.loc[H, 'Close']
             rs_price = df.loc[RS, 'Close']
             t1_price = df.loc[T1, 'Close']
             t2_price = df.loc[T2, 'Close']
-            
-            # ========== NECKLINE CALCULATION ==========
-            # Create horizontal neckline (average of trough prices)
-            avg_neckline = (t1_price + t2_price) / 2
-            
-            # ========== FIND CONNECTION POINTS ==========
-            # Left connection point (before left shoulder)
-            left_conn_idx = LS
-            for j in range(LS-1, max(0, LS-100), -1):  # Look back up to 100 candles
-                if df.loc[j, 'Close'] <= avg_neckline * 1.02:  # 2% tolerance
-                    left_conn_idx = j
+            neckline_end_price = pattern["neckline_price"]
+            target_price = pattern["target_price"]
+            pattern_color = pattern_colors[i % len(pattern_colors)]
+
+            # Calculate neckline slope
+            neckline_slope = (t2_price - t1_price) / (t2_idx - t1_idx) if (t2_idx - t1_idx) != 0 else 0
+
+            # Extend neckline leftward
+            left_start_idx = max(0, ls_idx - int((rs_idx - ls_idx) * 0.2))  # 20% before LS
+            left_neckline_price = t1_price + neckline_slope * (left_start_idx - t1_idx)
+
+            # Find intersection point after RS where price touches neckline
+            intersection_idx = rs_idx
+            for j in range(rs_idx, min(rs_idx + 30, len(df))):  # Look ahead 30 days max
+                neckline_at_j = t1_price + neckline_slope * (j - t1_idx)
+                price_at_j = df.iloc[j]['Close']
+                if (not pattern["type"] == "inverse" and price_at_j <= neckline_at_j * 1.02) or \
+                   (pattern["type"] == "inverse" and price_at_j >= neckline_at_j * 0.98):
+                    intersection_idx = j
                     break
-            
-            # Right connection point (after right shoulder)
-            right_conn_idx = min(RS + 100, len(df)-1)  # Look ahead up to 100 candles
-            for j in range(RS, right_conn_idx):
-                if df.loc[j, 'Close'] <= avg_neckline * 1.02:  # 2% tolerance
-                    right_conn_idx = j
-                    break
-            
+            intersection_price = df.iloc[intersection_idx]['Close']
+
             # ========== PATTERN MARKERS ==========
-            # Left connection point (new)
-            fig.add_trace(go.Scatter(
-                x=[df.loc[left_conn_idx, 'Date']], 
-                y=[df.loc[left_conn_idx, 'Close']],
-                mode="markers",
-                marker=dict(size=8, color="#673AB7", symbol="circle-x"),
-                name=f"Start Point {i+1}",
-                legendgroup=f"pattern{i+1}",
-                hoverinfo='x+y',
-                hovertemplate='Start Point<extra></extra>'
-            ), row=1, col=1)
-            
             # Left shoulder
             fig.add_trace(go.Scatter(
                 x=[df.loc[LS, 'Date']], y=[ls_price],
                 mode="markers+text", text=["LS"], textposition="top center",
-                marker=dict(size=12, color="#FF5252", symbol="circle"),
+                marker=dict(size=12, color=pattern_color, symbol="circle", line=dict(width=2, color='white')),
                 name=f"Left Shoulder {i+1}", legendgroup=f"pattern{i+1}",
-                hoverinfo='x+y',
-                hovertemplate='Left Shoulder<extra></extra>'
+                hoverinfo='x+y', hovertemplate='Left Shoulder: %{y:.2f}<extra></extra>'
             ), row=1, col=1)
-            
+
             # Head
             fig.add_trace(go.Scatter(
                 x=[df.loc[H, 'Date']], y=[h_price],
                 mode="markers+text", text=["H"], textposition="top center",
-                marker=dict(size=14, color="#4CAF50", symbol="circle"),
+                marker=dict(size=14, color=pattern_color, symbol="circle", line=dict(width=2, color='white')),
                 name=f"Head {i+1}", legendgroup=f"pattern{i+1}",
-                hoverinfo='x+y',
-                hovertemplate='Head<extra></extra>'
+                hoverinfo='x+y', hovertemplate='Head: %{y:.2f}<extra></extra>'
             ), row=1, col=1)
-            
+
             # Right shoulder
             fig.add_trace(go.Scatter(
                 x=[df.loc[RS, 'Date']], y=[rs_price],
                 mode="markers+text", text=["RS"], textposition="top center",
-                marker=dict(size=12, color="#FF5252", symbol="circle"),
+                marker=dict(size=12, color=pattern_color, symbol="circle", line=dict(width=2, color='white')),
                 name=f"Right Shoulder {i+1}", legendgroup=f"pattern{i+1}",
-                hoverinfo='x+y',
-                hovertemplate='Right Shoulder<extra></extra>'
-            ), row=1, col=1)
-            
-            # Right connection point (new)
-            fig.add_trace(go.Scatter(
-                x=[df.loc[right_conn_idx, 'Date']], 
-                y=[df.loc[right_conn_idx, 'Close']],
-                mode="markers",
-                marker=dict(size=8, color="#673AB7", symbol="circle-x"),
-                name=f"End Point {i+1}",
-                legendgroup=f"pattern{i+1}",
-                hoverinfo='x+y',
-                hovertemplate='End Point<extra></extra>'
+                hoverinfo='x+y', hovertemplate='Right Shoulder: %{y:.2f}<extra></extra>'
             ), row=1, col=1)
 
-            # Neckline points (troughs)
+            # Neckline points
             fig.add_trace(go.Scatter(
-                x=[df.loc[T1, 'Date']], y=[t1_price],
-                mode="markers", marker=dict(size=8, color="#673AB7", symbol="diamond"),
-                name=f"Neck Point {i+1}", legendgroup=f"pattern{i+1}",
-                hoverinfo='x+y',
-                hovertemplate='Neck Point 1<extra></extra>'
+                x=[df.loc[T1, 'Date'], df.loc[T2, 'Date']],
+                y=[t1_price, t2_price],
+                mode="markers", marker=dict(size=8, color=pattern_color, symbol="diamond"),
+                name=f"Neckline Points {i+1}", legendgroup=f"pattern{i+1}",
+                hoverinfo='x+y', hovertemplate='Neckline Point: %{y:.2f}<extra></extra>'
             ), row=1, col=1)
-            
-            fig.add_trace(go.Scatter(
-                x=[df.loc[T2, 'Date']], y=[t2_price],
-                mode="markers", marker=dict(size=8, color="#673AB7", symbol="diamond"),
-                showlegend=False, legendgroup=f"pattern{i+1}",
-                hoverinfo='x+y',
-                hovertemplate='Neck Point 2<extra></extra>'
-            ), row=1, col=1)
+
+            # Breakout point
+            if breakout_idx:
+                fig.add_trace(go.Scatter(
+                    x=[df.iloc[breakout_idx]['Date']], y=[df.iloc[breakout_idx]['Close']],
+                    mode="markers+text", text=["Break"], textposition="bottom center",
+                    marker=dict(size=10, color="#FF9800", symbol="triangle-down"),
+                    name=f"Breakout {i+1}", legendgroup=f"pattern{i+1}",
+                    hoverinfo='x+y', hovertemplate='Breakout: %{y:.2f}<extra></extra>'
+                ), row=1, col=1)
+
+            # Throwback Low
+            if throwback_low_idx:
+                fig.add_trace(go.Scatter(
+                    x=[df.iloc[throwback_low_idx]['Date']], y=[df.iloc[throwback_low_idx]['Close']],
+                    mode="markers+text", text=["Throw"], textposition="bottom center",
+                    marker=dict(size=10, color="#F44336", symbol="star"),
+                    name=f"Throwback Low {i+1}", legendgroup=f"pattern{i+1}",
+                    hoverinfo='x+y', hovertemplate='Throwback Low: %{y:.2f}<extra></extra>'
+                ), row=1, col=1)
+
+            # Pullback High
+            if pullback_high_idx:
+                fig.add_trace(go.Scatter(
+                    x=[df.iloc[pullback_high_idx]['Date']], y=[df.iloc[pullback_high_idx]['Close']],
+                    mode="markers+text", text=["Pull"], textposition="top center",
+                    marker=dict(size=10, color="#9C27B0", symbol="triangle-up"),
+                    name=f"Pullback High {i+1}", legendgroup=f"pattern{i+1}",
+                    hoverinfo='x+y', hovertemplate='Pullback High: %{y:.2f}<extra></extra>'
+                ), row=1, col=1)
 
             # ========== NECKLINE ==========
-            neckline_x = [df.loc[left_conn_idx, 'Date'], df.loc[right_conn_idx, 'Date']]
-            neckline_y = [avg_neckline, avg_neckline]
-            
+            neckline_x = [df.iloc[left_start_idx]['Date'], df.iloc[neckline_end_idx]['Date']]
+            neckline_y = [left_neckline_price, neckline_end_price]
             fig.add_trace(go.Scatter(
-                x=neckline_x,
-                y=neckline_y,
-                mode="lines",
-                line=dict(color="#673AB7", width=2, dash="dash"),
+                x=neckline_x, y=neckline_y,
+                mode="lines", line=dict(color=pattern_color, width=2, dash="dash"),
                 name=f"Neckline {i+1}", legendgroup=f"pattern{i+1}",
                 hoverinfo='none'
             ), row=1, col=1)
 
             # ========== FULL PATTERN OUTLINE ==========
+            # Connect to intersection point after RS
             pattern_x = [
-                df.loc[left_conn_idx, 'Date'],  # Start point
-                df.loc[LS, 'Date'],            # Left shoulder
-                df.loc[T1, 'Date'],            # Left trough
-                df.loc[H, 'Date'],             # Head
-                df.loc[T2, 'Date'],            # Right trough
-                df.loc[RS, 'Date'],            # Right shoulder
-                df.loc[right_conn_idx, 'Date']  # End point
+                df.iloc[left_start_idx]['Date'],
+                df.loc[LS, 'Date'],
+                df.loc[T1, 'Date'],
+                df.loc[H, 'Date'],
+                df.loc[T2, 'Date'],
+                df.loc[RS, 'Date'],
+                df.iloc[intersection_idx]['Date']
             ]
-            
             pattern_y = [
-                df.loc[left_conn_idx, 'Close'],  # Start price
-                ls_price,                       # Left shoulder
-                t1_price,                      # Left trough
-                h_price,                       # Head
-                t2_price,                      # Right trough
-                rs_price,                      # Right shoulder
-                df.loc[right_conn_idx, 'Close'] # End price
+                left_neckline_price,
+                ls_price,
+                t1_price,
+                h_price,
+                t2_price,
+                rs_price,
+                intersection_price
             ]
-            
             fig.add_trace(go.Scatter(
-                x=pattern_x,
-                y=pattern_y,
-                mode="lines",
-                line=dict(color="rgba(156, 39, 176, 0.5)", width=3),
-                name=f"Pattern Outline {i+1}", legendgroup=f"pattern{i+1}",
+                x=pattern_x, y=pattern_y,
+                mode="lines", line=dict(color=pattern_color, width=3, dash='solid'),
+                opacity=0.6, name=f"Pattern Outline {i+1}", legendgroup=f"pattern{i+1}",
                 hoverinfo='none'
             ), row=1, col=1)
 
+            # ========== V-FORMATION ==========
+            if breakout_idx and throwback_low_idx and pullback_high_idx:
+                v_x = [
+                    df.iloc[breakout_idx]['Date'],
+                    df.iloc[throwback_low_idx]['Date'],
+                    df.iloc[pullback_high_idx]['Date']
+                ]
+                v_y = [
+                    df.iloc[breakout_idx]['Close'],
+                    df.iloc[throwback_low_idx]['Close'],
+                    df.iloc[pullback_high_idx]['Close']
+                ]
+                fig.add_trace(go.Scatter(
+                    x=v_x, y=v_y,
+                    mode="lines", line=dict(color="#F44336", width=2, dash="dot"),
+                    name=f"V-Formation {i+1}", legendgroup=f"pattern{i+1}",
+                    hoverinfo='none'
+                ), row=1, col=1)
+
             # ========== TARGET PROJECTION ==========
-            pattern_height = h_price - avg_neckline
-            target_price = avg_neckline - pattern_height
-            
-            # Target line
+            target_start_idx = breakout_idx if breakout_idx else rs_idx
             fig.add_trace(go.Scatter(
-                x=[df.loc[RS, 'Date'], df.loc[right_conn_idx, 'Date']],
+                x=[df.iloc[target_start_idx]['Date'], df.iloc[-1]['Date']],
                 y=[target_price, target_price],
-                mode="lines",
+                mode="lines+text", text=["", f"Target: {target_price:.2f}"],
+                textposition="middle right",
                 line=dict(color="#E91E63", width=1.5, dash="dot"),
                 name=f"Target {i+1}", legendgroup=f"pattern{i+1}",
                 hoverinfo='none'
             ), row=1, col=1)
-            
-            # Target annotation
-            fig.add_annotation(
-                x=df.loc[right_conn_idx, 'Date'],
-                y=target_price,
-                text=f"Target: {target_price:.2f}",
-                showarrow=True,
-                arrowhead=1,
-                ax=0,
-                ay=-30,
-                font=dict(size=10, color="#E91E63")
-            )
-            
-            # Pattern height annotation
+
+            # Annotations
             fig.add_annotation(
                 x=df.loc[H, 'Date'],
-                y=avg_neckline + pattern_height/2,
-                text=f"Height: {pattern_height:.2f}",
-                showarrow=True,
-                arrowhead=1,
-                ax=0,
-                ay=0,
-                font=dict(size=10, color="#4CAF50")
+                y=h_price + (pattern["pattern_height"] / 2 if not pattern["type"] == "inverse" else -pattern["pattern_height"] / 2),
+                text=f"H: {pattern['pattern_height']:.2f}",
+                showarrow=True, arrowhead=1, ax=0, ay=-30 if not pattern["type"] == "inverse" else 30,
+                font=dict(size=10, color=pattern_color)
             )
-            
+
         except Exception as e:
             print(f"Error plotting pattern {i}: {str(e)}")
             continue
@@ -532,168 +710,181 @@ def plot_head_and_shoulders(df, patterns):
     # Volume chart
     fig.add_trace(
         go.Bar(
-            x=df['Date'], 
-            y=df['Volume'], 
+            x=df['Date'], y=df['Volume'],
             name="Volume", 
-            marker=dict(
-                color=np.where(df['Close'] >= df['Open'], '#26A69A', '#EF5350'),
-                opacity=0.7
-            ),
-            hoverinfo='x+y',
-            hovertemplate='Date: %{x}<br>Volume: %{y:,.0f}<extra></extra>'
+            marker=dict(color=np.where(df['Close'] >= df['Open'], '#26A69A', '#EF5350'), opacity=0.7),
+            hoverinfo='x+y', hovertemplate='Date: %{x}<br>Volume: %{y:,.0f}<extra></extra>'
         ),
         row=2, col=1
     )
 
-    # RSI chart (if available)
+    # RSI chart
     if 'RSI' in df.columns:
         fig.add_trace(
             go.Scatter(
-                x=df['Date'], 
-                y=df['RSI'], 
-                mode='lines', 
-                name="RSI", 
-                line=dict(color="#7B1FA2", width=1.5),
-                hoverinfo='x+y',
-                hovertemplate='Date: %{x}<br>RSI: %{y:.2f}<extra></extra>'
+                x=df['Date'], y=df['RSI'],
+                mode='lines', name="RSI", line=dict(color="#7B1FA2", width=1.5),
+                hoverinfo='x+y', hovertemplate='Date: %{x}<br>RSI: %{y:.2f}<extra></extra>'
             ),
             row=3, col=1
         )
-        
-        # Overbought/oversold lines
         fig.add_hline(y=70, row=3, col=1, line=dict(color="red", width=1, dash="dash"))
         fig.add_hline(y=30, row=3, col=1, line=dict(color="green", width=1, dash="dash"))
 
-    # ========== FINAL LAYOUT ==========
+    # Final layout
     fig.update_layout(
         title={
-            'text': f"Head & Shoulders Patterns (Found: {len(patterns)})",
-            'y':0.95,
-            'x':0.5,
+            'text': f"Head & Shoulders Patterns for {stock_name} (Found: {len(patterns)})",
+            'y': 0.95, 'x': 0.5, 'xanchor': 'center', 'yanchor': 'top',
             'font': dict(size=20, color="#0D47A1")
         },
-        height=900,
-        template="plotly_white",
+        height=900, template="plotly_white",
         hovermode="x unified",
         legend=dict(
-            orientation="v",  # Vertical legend
-            yanchor="top",
-            y=0.99,
-            xanchor="right",
-            x=1.25,          # Move legend outside plot
-            font=dict(size=10),
-            bgcolor='rgba(255,255,255,0.8)',
-            bordercolor='#CCCCCC',
-            borderwidth=1
+            orientation="v", groupclick="toggleitem",
+            yanchor="top", y=1, xanchor="right", x=1.15,
+            font=dict(size=10), bgcolor='rgba(255,255,255,0.8)', bordercolor='#CCCCCC', borderwidth=1
         ),
-        margin=dict(l=50, r=150, t=100, b=50),  # Extra right margin for legend
-        xaxis=dict(showgrid=False),
-        xaxis2=dict(showgrid=False),
-        yaxis=dict(showgrid=True, gridcolor='rgba(0,0,0,0.05)'),
-        yaxis2=dict(showgrid=True, gridcolor='rgba(0,0,0,0.05)'),
-        yaxis3=dict(showgrid=True, gridcolor='rgba(0,0,0,0.05)')
+        margin=dict(l=50, r=150, t=100, b=50),
+        plot_bgcolor='rgba(245,245,245,1)',
+        paper_bgcolor='rgba(255,255,255,1)'
     )
-    
-    # Axis titles
-    fig.update_yaxes(title_text="Price", row=1, col=1)
-    fig.update_yaxes(title_text="Volume", row=2, col=1)
+
+    fig.update_yaxes(title_text="Price", gridcolor="lightgray", row=1, col=1)
+    fig.update_yaxes(title_text="Volume", gridcolor="lightgray", row=2, col=1)
     if 'RSI' in df.columns:
-        fig.update_yaxes(title_text="RSI (14)", row=3, col=1)
-    
+        fig.update_yaxes(title_text="RSI (14)", range=[0, 100], gridcolor="lightgray", row=3, col=1)
+
     return fig
 
-def detect_double_bottom(df, order=20, tolerance=0.05, min_pattern_length=10,
-                        max_patterns=3, min_height_ratio=0.3, confirmation_bars=3):
+def detect_double_bottom(df, 
+                         order=5,              # Window for extrema detection
+                         tolerance=0.05,      # Max % difference between bottoms
+                         min_pattern_length=5, # Min days between troughs
+                         max_patterns=3,       # Max patterns to return
+                         min_height_ratio=0.2, # Min height relative to prior drop
+                         downtrend_lookback=20, # Days to check prior downtrend
+                         confirmation_bars=2,   # Bars to confirm breakout
+                         volume_increase=1.5):  # Min volume spike on breakout
+
+    # Helper function to find peaks and troughs
+    def find_extrema(df, order):
+        close = df['Close'].values
+        peaks = argrelextrema(close, np.greater, order=order)[0].tolist()
+        troughs = argrelextrema(close, np.less, order=order)[0].tolist()
+        return peaks, troughs
+
     peaks, troughs = find_extrema(df, order=order)
     patterns = []
     
     if len(troughs) < 2:
         return patterns
-    
+
     for i in range(len(troughs) - 1):
         trough1_idx = troughs[i]
         price1 = df['Close'].iloc[trough1_idx]
-        
+
+        # Check for preceding downtrend
+        if trough1_idx < downtrend_lookback:
+            continue
+        prior_prices = df['Close'].iloc[trough1_idx - downtrend_lookback:trough1_idx]
+        prior_high = prior_prices.max()
+        if prior_high <= price1 or (prior_high - price1) / prior_high < 0.05:  # At least 5% drop
+            continue
+
         for j in range(i + 1, len(troughs)):
             trough2_idx = troughs[j]
             
             # Basic validation
-            if (trough1_idx >= trough2_idx or 
-                trough2_idx - trough1_idx < min_pattern_length):
+            if (trough2_idx - trough1_idx < min_pattern_length):
                 continue
                 
             price2 = df['Close'].iloc[trough2_idx]
-            if abs(price1 - price2)/price1 > tolerance:
+            if abs(price1 - price2) / price1 > tolerance:
                 continue
-                
-            # NEW: Peak validation
+
+            # Neckline: Highest peak between troughs
             between_peaks = [p for p in peaks if trough1_idx < p < trough2_idx]
             if not between_peaks:
                 continue
-                
-            highest_peak = df['Close'].iloc[between_peaks].max()
-            if highest_peak <= max(price1, price2) * 1.01:
-                continue
-
-                
-            # Neckline validation
-            between_slice = df['Close'].iloc[trough1_idx:trough2_idx+1]
-            neckline_idx = between_slice.idxmax()
+            neckline_idx = max(between_peaks, key=lambda p: df['Close'].iloc[p])
             neckline_price = df['Close'].iloc[neckline_idx]
             
-            if (neckline_idx == trough1_idx or 
-                neckline_idx == trough2_idx or
-                neckline_price <= max(price1, price2) * 1.01):  # 1% buffer
+            if neckline_price <= max(price1, price2) * 1.02:  # Must be >2% above bottoms
                 continue
-                
+
             # Pattern height validation
             min_trough_price = min(price1, price2)
-            if trough1_idx > 0:
-                prev_high = df['Close'].iloc[:trough1_idx].max()
-                if (neckline_price - min_trough_price) < min_height_ratio * (prev_high - min_trough_price):
-                    continue
-                    
-            # Breakout confirmation
-            breakout_idx, confirmation_idx = None, None
+            pattern_height = neckline_price - min_trough_price
+            prior_drop = prior_high - min_trough_price
+            if pattern_height < min_height_ratio * prior_drop:
+                continue
+
+            # Breakout and confirmation
+            breakout_idx = None
+            confirmation_idx = None
             for idx in range(trough2_idx, min(len(df), trough2_idx + 50)):
-                if df['Close'].iloc[idx] > neckline_price:
+                current_price = df['Close'].iloc[idx]
+                if current_price > neckline_price:
+                    # Check volume spike on breakout
+                    if 'Volume' in df.columns:
+                        avg_prior_vol = df['Volume'].iloc[trough2_idx-10:trough2_idx].mean()
+                        if df['Volume'].iloc[idx] < avg_prior_vol * volume_increase:
+                            continue
                     breakout_idx = idx
-                    if all(df['Close'].iloc[idx+k] > neckline_price 
-                           for k in range(1, confirmation_bars+1)):
-                        confirmation_idx = idx + confirmation_bars
-                    break
                     
+                    # Confirm price holds above neckline
+                    if idx + confirmation_bars < len(df):
+                        if all(df['Close'].iloc[idx+k] > neckline_price 
+                               for k in range(1, confirmation_bars+1)):
+                            confirmation_idx = idx + confirmation_bars
+                            break
+                    break
+
+            # Invalidation check
+            if breakout_idx:
+                post_breakout = df['Close'].iloc[trough2_idx:breakout_idx+1]
+                if post_breakout.min() < min_trough_price:
+                    continue  # Pattern invalid if price falls below second bottom
+
             if not breakout_idx:
                 continue
-                
+
+            # Target calculation
+            target_price = neckline_price + pattern_height
+
             patterns.append({
                 'trough1': trough1_idx,
                 'trough2': trough2_idx,
                 'neckline': neckline_idx,
                 'neckline_price': neckline_price,
                 'breakout': breakout_idx,
-                'confirmation': confirmation_idx,
-                'target': neckline_price + (neckline_price - min_trough_price),
-                'pattern_height': neckline_price - min_trough_price,
-                'trough_prices': (price1, price2)
+                'confirmation': confirmation_idx if confirmation_idx else breakout_idx,
+                'target': target_price,
+                'pattern_height': pattern_height,
+                'trough_prices': (price1, price2),
+                'status': 'confirmed' if confirmation_idx else 'forming'
             })
-    
-    # Filter overlapping patterns
+
+    # Filter overlapping patterns and sort by strength
     filtered_patterns = []
     last_end = -1
-    for pattern in sorted(patterns, key=lambda x: x['trough1']):
+    for pattern in sorted(patterns, key=lambda x: x['pattern_height'], reverse=True):
         if pattern['trough1'] > last_end:
             filtered_patterns.append(pattern)
-            last_end = pattern['trough2']
+            last_end = pattern['confirmation'] if pattern['confirmation'] else pattern['breakout']
             if len(filtered_patterns) >= max_patterns:
                 break
-                
+
     return filtered_patterns
 
-def plot_double_bottom(df, pattern_points):
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+def plot_double_bottom(df, pattern_points, stock_name=""):
     """
     Enhanced Double Bottom pattern visualization with clear W formation, neckline, 
-    resistance, breakout points, and target levels.
+    breakout, retest, and target levels.
     
     Args:
         df (pd.DataFrame): DataFrame containing stock data.
@@ -702,43 +893,36 @@ def plot_double_bottom(df, pattern_points):
     Returns:
         go.Figure: Plotly figure object.
     """
-    # Create a subplot with 2 rows (price and volume)
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, 
         row_heights=[0.7, 0.3],
         subplot_titles=("Price Chart with Double Bottom Patterns", "Volume")
     )
     
-    # Add a simple line chart for the closing prices
+    # Price line
     fig.add_trace(
         go.Scatter(
-            x=df['Date'],
-            y=df['Close'],
-            mode='lines',
-            name="Price",
+            x=df['Date'], y=df['Close'],
+            mode='lines', name="Price",
             line=dict(color='#1f77b4', width=2),
             showlegend=False
         ),
         row=1, col=1
     )
 
-    # Add moving average (optional)
+    # Moving average (optional)
     if 'MA' in df.columns:
         fig.add_trace(
             go.Scatter(
-                x=df['Date'], 
-                y=df['MA'], 
-                mode='lines', 
-                name="Moving Average (50)", 
+                x=df['Date'], y=df['MA'],
+                mode='lines', name="MA (50)",
                 line=dict(color="#FB8C00", width=2)
             ),
             row=1, col=1
         )
     
-    # Define colors for pattern visualization
     pattern_colors = ['#E91E63', '#9C27B0', '#673AB7', '#3F51B5', '#2196F3']
     
-    # Add pattern-specific visualization
     for idx, pattern in enumerate(pattern_points):
         if not isinstance(pattern, dict):
             continue
@@ -751,218 +935,174 @@ def plot_double_bottom(df, pattern_points):
         neckline_idx = pattern['neckline']
         neckline_price = pattern['neckline_price']
         target_price = pattern['target']
-        
-        # Get dates for all points
+        breakout_idx = pattern.get('breakout')
+        confirmation_idx = pattern.get('confirmation')
+
+        # Dates
         trough1_date = df['Date'].iloc[trough1_idx]
         trough2_date = df['Date'].iloc[trough2_idx]
         neckline_date = df['Date'].iloc[neckline_idx]
         
-        # Add markers for troughs (bottoms) with improved visibility
+        # Markers for troughs
         fig.add_trace(
             go.Scatter(
-                x=[trough1_date], 
-                y=[df['Close'].iloc[trough1_idx]],
-                mode="markers+text", 
-                text=["Bottom 1"], 
-                textposition="bottom center",
+                x=[trough1_date], y=[df['Close'].iloc[trough1_idx]],
+                mode="markers+text", text=["Bottom 1"], textposition="bottom center",
                 textfont=dict(size=12, color=color),
                 marker=dict(size=12, color=color, symbol="circle", line=dict(width=2, color='white')),
-                name=f"Pattern {idx+1}: Bottom 1",
-                legendgroup=f"pattern{idx+1}"
+                name=f"Pattern {idx+1}: Bottom 1", legendgroup=f"pattern{idx+1}"
+            ),
+            row=1, col=1
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=[trough2_date], y=[df['Close'].iloc[trough2_idx]],
+                mode="markers+text", text=["Bottom 2"], textposition="bottom center",
+                textfont=dict(size=12, color=color),
+                marker=dict(size=12, color=color, symbol="circle", line=dict(width=2, color='white')),
+                name=f"Pattern {idx+1}: Bottom 2", legendgroup=f"pattern{idx+1}"
             ),
             row=1, col=1
         )
         
+        # Neckline marker
         fig.add_trace(
             go.Scatter(
-                x=[trough2_date], 
-                y=[df['Close'].iloc[trough2_idx]],
-                mode="markers+text", 
-                text=["Bottom 2"], 
-                textposition="bottom center",
-                textfont=dict(size=12, color=color),
-                marker=dict(size=12, color=color, symbol="circle", line=dict(width=2, color='white')),
-                name=f"Pattern {idx+1}: Bottom 2",
-                legendgroup=f"pattern{idx+1}"
-            ),
-            row=1, col=1
-        )
-        
-        # Add neckline point
-        fig.add_trace(
-            go.Scatter(
-                x=[neckline_date], 
-                y=[neckline_price],
-                mode="markers+text", 
-                text=["Neckline"], 
-                textposition="top center",
+                x=[neckline_date], y=[neckline_price],
+                mode="markers+text", text=["Neckline"], textposition="top center",
                 textfont=dict(size=12, color=color),
                 marker=dict(size=12, color=color, symbol="triangle-up", line=dict(width=2, color='white')),
-                name=f"Pattern {idx+1}: Neckline",
-                legendgroup=f"pattern{idx+1}"
+                name=f"Pattern {idx+1}: Neckline", legendgroup=f"pattern{idx+1}"
             ),
             row=1, col=1
         )
         
-        # Add W formation visualization (connecting the points)
-        w_formation_x = [trough1_date]
-        w_formation_y = [df['Close'].iloc[trough1_idx]]
-        
-        # Add intermediate peaks for W formation
-        if 'w_formation_peaks' in pattern and pattern['w_formation_peaks']:
-            for peak_idx in pattern['w_formation_peaks']:
-                w_formation_x.append(df['Date'].iloc[peak_idx])
-                w_formation_y.append(df['Close'].iloc[peak_idx])
-        
-        w_formation_x.append(trough2_date)
-        w_formation_y.append(df['Close'].iloc[trough2_idx])
-        
-        # Draw the W formation line
+        # W formation (trough1 -> neckline -> trough2)
+        w_formation_x = [trough1_date, neckline_date, trough2_date]
+        w_formation_y = [df['Close'].iloc[trough1_idx], neckline_price, df['Close'].iloc[trough2_idx]]
         fig.add_trace(
             go.Scatter(
-                x=w_formation_x, 
-                y=w_formation_y,
-                mode="lines", 
-                line=dict(color=color, width=2, dash='dot'),
-                name=f"Pattern {idx+1}: W Formation",
-                legendgroup=f"pattern{idx+1}"
+                x=w_formation_x, y=w_formation_y,
+                mode="lines", line=dict(color=color, width=2, dash='dot'),
+                name=f"Pattern {idx+1}: W Formation", legendgroup=f"pattern{idx+1}"
             ),
             row=1, col=1
         )
         
-        # Draw horizontal neckline/resistance line
-        # Extend the neckline from first trough to a bit after the second trough
-        extension_length = int(0.3 * (trough2_idx - trough1_idx))
-        end_idx = min(len(df) - 1, trough2_idx + extension_length)
-        neckline_x = [trough1_date, df['Date'].iloc[end_idx]]
+        # Neckline line (start at neckline_date, end at breakout or beyond)
+        end_idx = confirmation_idx if confirmation_idx else (breakout_idx if breakout_idx else trough2_idx + int(0.5 * (trough2_idx - trough1_idx)))
+        end_idx = min(len(df) - 1, end_idx)
+        neckline_x = [neckline_date, df['Date'].iloc[end_idx]]
         neckline_y = [neckline_price, neckline_price]
-        
         fig.add_trace(
             go.Scatter(
-                x=neckline_x, 
-                y=neckline_y,
-                mode="lines", 
-                line=dict(color=color, width=2),
-                name=f"Pattern {idx+1}: Resistance Line",
-                legendgroup=f"pattern{idx+1}"
+                x=neckline_x, y=neckline_y,
+                mode="lines", line=dict(color=color, width=2),
+                name=f"Pattern {idx+1}: Neckline", legendgroup=f"pattern{idx+1}"
             ),
             row=1, col=1
         )
         
-        # Add breakout point if it exists
-        if pattern.get('breakout') is not None:
-            breakout_idx = pattern['breakout']
+        # Breakout and confirmation
+        if breakout_idx:
             breakout_date = df['Date'].iloc[breakout_idx]
-            
             fig.add_trace(
                 go.Scatter(
-                    x=[breakout_date], 
-                    y=[df['Close'].iloc[breakout_idx]],
-                    mode="markers+text", 
-                    text=["Breakout"], 
-                    textposition="top right",
+                    x=[breakout_date], y=[df['Close'].iloc[breakout_idx]],
+                    mode="markers+text", text=["Breakout"], textposition="top right",
                     textfont=dict(size=12, color=color),
                     marker=dict(size=12, color=color, symbol="star", line=dict(width=2, color='white')),
-                    name=f"Pattern {idx+1}: Breakout",
-                    legendgroup=f"pattern{idx+1}"
+                    name=f"Pattern {idx+1}: Breakout", legendgroup=f"pattern{idx+1}"
                 ),
                 row=1, col=1
             )
             
-            # Add confirmation point if it exists
-            if pattern.get('confirmation') is not None:
-                confirm_idx = pattern['confirmation']
-                confirm_date = df['Date'].iloc[confirm_idx]
-                
+            if confirmation_idx:
+                confirm_date = df['Date'].iloc[confirmation_idx]
                 fig.add_trace(
                     go.Scatter(
-                        x=[confirm_date], 
-                        y=[df['Close'].iloc[confirm_idx]],
-                        mode="markers+text", 
-                        text=["Confirmation"], 
-                        textposition="top right",
+                        x=[confirm_date], y=[df['Close'].iloc[confirmation_idx]],
+                        mode="markers+text", text=["Confirmation"], textposition="top right",
                         textfont=dict(size=12, color=color),
                         marker=dict(size=12, color=color, symbol="diamond", line=dict(width=2, color='white')),
-                        name=f"Pattern {idx+1}: Confirmation",
-                        legendgroup=f"pattern{idx+1}"
+                        name=f"Pattern {idx+1}: Confirmation", legendgroup=f"pattern{idx+1}"
                     ),
                     row=1, col=1
                 )
+                
+                # Check for retest (optional)
+                post_breakout = df['Close'].iloc[breakout_idx:confirmation_idx+10]
+                retest_idx = post_breakout.idxmin()
+                if retest_idx and post_breakout[retest_idx] <= neckline_price * 1.02 and post_breakout[retest_idx] > min(df['Close'].iloc[trough1_idx], df['Close'].iloc[trough2_idx]):
+                    retest_date = df['Date'].iloc[retest_idx]
+                    fig.add_trace(
+                        go.Scatter(
+                            x=[retest_date], y=[df['Close'].iloc[retest_idx]],
+                            mode="markers+text", text=["Retest"], textposition="bottom right",
+                            textfont=dict(size=12, color=color),
+                            marker=dict(size=10, color=color, symbol="x", line=dict(width=2, color='white')),
+                            name=f"Pattern {idx+1}: Retest", legendgroup=f"pattern{idx+1}"
+                        ),
+                        row=1, col=1
+                    )
             
-            # Add target price line (horizontal line at target price)
-            # Only show target if breakout is confirmed
-            target_x = [breakout_date, df['Date'].iloc[-1]]  # From breakout to end of chart
+            # Target line
+            target_x = [breakout_date, df['Date'].iloc[-1]]
             target_y = [target_price, target_price]
-            
             fig.add_trace(
                 go.Scatter(
-                    x=target_x, 
-                    y=target_y,
-                    mode="lines+text", 
-                    text=["Target"], 
-                    textposition="middle right",
+                    x=target_x, y=target_y,
+                    mode="lines+text", text=["Target"], textposition="middle right",
                     textfont=dict(size=12, color=color),
                     line=dict(color=color, width=2, dash='dash'),
-                    name=f"Pattern {idx+1}: Target",
-                    legendgroup=f"pattern{idx+1}"
+                    name=f"Pattern {idx+1}: Target", legendgroup=f"pattern{idx+1}"
                 ),
                 row=1, col=1
             )
-    
-    # Add volume chart with color based on price movement
+        
+        # Highlight downtrend (optional, assuming 20 days prior to trough1)
+        downtrend_start = max(0, trough1_idx - 20)
+        fig.add_trace(
+            go.Scatter(
+                x=df['Date'].iloc[downtrend_start:trough1_idx+1],
+                y=df['Close'].iloc[downtrend_start:trough1_idx+1],
+                mode="lines", line=dict(color="grey", width=2, dash='dash'),
+                name=f"Pattern {idx+1}: Downtrend", legendgroup=f"pattern{idx+1}", opacity=0.5
+            ),
+            row=1, col=1
+        )
+
+    # Volume chart with breakout highlight
     colors = ['#26A69A' if df['Close'].iloc[i] >= df['Open'].iloc[i] else '#EF5350' for i in range(len(df))]
-    
+    if breakout_idx and 'Volume' in df.columns:
+        colors[breakout_idx] = '#FFD700'  # Gold for breakout volume
     fig.add_trace(
         go.Bar(
-            x=df['Date'], 
-            y=df['Volume'], 
-            name="Volume", 
-            marker=dict(color=colors, opacity=0.8)
+            x=df['Date'], y=df['Volume'],
+            name="Volume", marker=dict(color=colors, opacity=0.8)
         ),
         row=2, col=1
     )
     
-    # Update layout
+    # Layout
     fig.update_layout(
         title={
-            'text': "Double Bottom Pattern Detection",
-            'y': 0.95,
-            'x': 0.5,
-            'xanchor': 'center',
-            'yanchor': 'top',
+            'text': f"Double Bottom Pattern Detection for {stock_name}",
+            'y': 0.95, 'x': 0.5, 'xanchor': 'center', 'yanchor': 'top',
             'font': dict(size=20, color="#0D47A1")
         },
-        height=800,
-        template="plotly_white",
+        height=800, template="plotly_white",
         legend=dict(
-            orientation="v",
-            groupclick="toggleitem",
-            yanchor="top",
-            y=1,
-            xanchor="left",
-            x=1.02,
-            font=dict(size=10),
-            tracegroupgap=5
+            orientation="v", groupclick="toggleitem",
+            yanchor="top", y=1, xanchor="left", x=1.02,
+            font=dict(size=10), tracegroupgap=5
         ),
         margin=dict(l=40, r=150, t=100, b=40),
-        hovermode="x unified",
-        xaxis_rangeslider_visible=False
+        hovermode="x unified", xaxis_rangeslider_visible=False
     )
     
-    # Update y-axis to show proper price formatting
-    fig.update_yaxes(
-        title_text="Price",
-        tickprefix="$",
-        gridcolor='lightgray',
-        row=1, col=1
-    )
-    
-    # Update volume y-axis
-    fig.update_yaxes(
-        title_text="Volume",
-        gridcolor='lightgray',
-        row=2, col=1
-    )
+    fig.update_yaxes(title_text="Price", tickprefix="$", gridcolor='lightgray', row=1, col=1)
+    fig.update_yaxes(title_text="Volume", gridcolor='lightgray', row=2, col=1)
     
     return fig
 
@@ -1047,7 +1187,7 @@ def detect_cup_and_handle(df, order=15, cup_min_bars=20, handle_max_retrace=0.5)
     
     return patterns
 
-def plot_cup_and_handle(df, pattern_points):
+def plot_cup_and_handle(df, pattern_points, stock_name=""):
     """
     Enhanced Cup and Handle pattern visualization with clear resistance, breakout, and proper cup/handle formation.
     
@@ -1437,11 +1577,8 @@ def plot_cup_and_handle(df, pattern_points):
     # Update layout
     fig.update_layout(
         title={
-            'text': "Cup and Handle Pattern Detection",
-            'y': 0.95,
-            'x': 0.5,
-            'xanchor': 'center',
-            'yanchor': 'top',
+            'text': f"Cup and Handle Pattern Detection for {stock_name}",
+            'y': 0.95, 'x': 0.5, 'xanchor': 'center', 'yanchor': 'top',
             'font': dict(size=20, color="#0D47A1")
         },
         height=800,
@@ -1460,18 +1597,7 @@ def plot_cup_and_handle(df, pattern_points):
     
     return fig
 
-def plot_pattern(df, pattern_points, pattern_name):
-    """
-    Route to the appropriate pattern-specific plotting function.
-    
-    Args:
-        df: DataFrame with OHLCV data
-        pattern_points: Detected patterns
-        pattern_name: One of ['Double Bottom', 'Cup and Handle', 'Head and Shoulders']
-    
-    Returns:
-        go.Figure: The plotted chart
-    """
+def plot_pattern(df, pattern_points, pattern_name, stock_name=""):
     plotters = {
         'Double Bottom': plot_double_bottom,
         'Cup and Handle': plot_cup_and_handle,
@@ -1481,49 +1607,93 @@ def plot_pattern(df, pattern_points, pattern_name):
     if pattern_name not in plotters:
         raise ValueError(f"Unsupported pattern type: {pattern_name}. Available: {list(plotters.keys())}")
     
-    return plotters[pattern_name](df, pattern_points)
+    return plotters[pattern_name](df, pattern_points, stock_name)
 
-def evaluate_pattern_detection(df, patterns):
-    total_patterns = 0
-    correct_predictions = 0
-    false_positives = 0
-    look_forward_window = 10
-
+def evaluate_pattern_detection(df, patterns, look_forward_window=10):
+    """
+    Evaluate the performance of detected patterns and calculate metrics per pattern type.
+    
+    Args:
+        df (pd.DataFrame): DataFrame containing stock data.
+        patterns (dict): Dictionary of pattern types and their detected instances.
+        look_forward_window (int): Number of bars to look forward for evaluation.
+    
+    Returns:
+        dict: Metrics (Accuracy, Precision, Recall, F1) for each pattern type.
+    """
+    metrics = {}
+    
     for pattern_type, pattern_list in patterns.items():
-        total_patterns += len(pattern_list)
+        TP = 0  # True Positives: Correctly predicted direction
+        FP = 0  # False Positives: Incorrectly predicted direction
+        FN = 0  # False Negatives: Missed patterns (approximated)
+        TN = 0  # True Negatives: Correctly identified no pattern (approximated)
+
+        if not pattern_list:
+            metrics[pattern_type] = {
+                "Accuracy": 0.0,
+                "Precision": 0.0,
+                "Recall": 0.0,
+                "F1": 0.0,
+                "Total Patterns": 0,
+                "Correct Predictions": 0
+            }
+            continue
+
+        total_patterns = len(pattern_list)
+
         for pattern in pattern_list:
+            # Determine the last point of the pattern
             if pattern_type == "Head and Shoulders":
-                last_point_idx = max(pattern['left_shoulder'], pattern['head'], pattern['right_shoulder'])
-            elif pattern_type == "Double Top":
-                last_point_idx = max(pattern['peak1'], pattern['peak2'])
+                last_point_idx = df.index.get_loc(max(pattern['left_shoulder'], pattern['head'], pattern['right_shoulder']))
             elif pattern_type == "Double Bottom":
                 last_point_idx = max(pattern['trough1'], pattern['trough2'])
             elif pattern_type == "Cup and Handle":
                 last_point_idx = pattern['handle_end']
             else:
-                continue 
+                continue
 
-            if last_point_idx + look_forward_window < len(df):
-                if pattern_type in ["Double Bottom", "Cup and Handle"]:
-                    if df['Close'][last_point_idx + look_forward_window] > df['Close'][last_point_idx]:
-                        correct_predictions += 1
-                    elif df['Close'][last_point_idx + look_forward_window] < df['Close'][last_point_idx]:
-                        false_positives += 1
-                elif pattern_type in ["Head and Shoulders", "Double Top"]:
-                    if df['Close'][last_point_idx + look_forward_window] < df['Close'][last_point_idx]:
-                        correct_predictions += 1
-                    elif df['Close'][last_point_idx + look_forward_window] > df['Close'][last_point_idx]:
-                        false_positives += 1
+            if last_point_idx + look_forward_window >= len(df):
+                FN += 1  # Not enough data to evaluate
+                continue
 
-    if total_patterns > 0:
-        accuracy = correct_predictions / total_patterns
-        precision = correct_predictions / (correct_predictions + false_positives) if (correct_predictions + false_positives) > 0 else 0
-    else:
-        accuracy = 0.0
-        precision = 0.0
+            last_price = df['Close'].iloc[last_point_idx]
+            future_price = df['Close'].iloc[last_point_idx + look_forward_window]
 
-    return accuracy, precision
+            # Evaluate based on pattern type
+            if pattern_type == "Head and Shoulders":  # Bearish
+                if future_price < last_price:
+                    TP += 1
+                else:
+                    FP += 1
+            elif pattern_type in ["Double Bottom", "Cup and Handle"]:  # Bullish
+                if future_price > last_price:
+                    TP += 1
+                else:
+                    FP += 1
 
+        # Approximate FN and TN (simplified approach)
+        total_periods = len(df) - look_forward_window
+        non_pattern_periods = total_periods - total_patterns
+        FN = max(0, total_patterns - (TP + FP))
+        TN = max(0, non_pattern_periods - FP)
+
+        # Calculate metrics
+        accuracy = (TP + TN) / (TP + TN + FP + FN) if (TP + TN + FP + FN) > 0 else 0.0
+        precision = TP / (TP + FP) if (TP + FP) > 0 else 0.0
+        recall = TP / (TP + FN) if (TP + FN) > 0 else 0.0
+        f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+
+        metrics[pattern_type] = {
+            "Accuracy": accuracy,
+            "Precision": precision,
+            "Recall": recall,
+            "F1": f1,
+            "Total Patterns": total_patterns,
+            "Correct Predictions": TP
+        }
+
+    return metrics
 def is_trading_day(date):
     """Check if the given date is a trading day (Monday to Friday)."""
     return date.weekday() < 5 
@@ -1534,38 +1704,35 @@ def get_nearest_trading_day(date):
         date -= datetime.timedelta(days=1)
     return date
 
-def forecast_future_prices(df, forecast_days=30):
-    """Forecast future prices using linear regression."""
-    # Prepare data for linear regression
-    X = np.array(range(len(df))).reshape(-1, 1)
-    y = df['Close'].values
+# def forecast_future_prices(df, forecast_days=30):
+#     """Forecast future prices using linear regression."""
+#     # Prepare data for linear regression
+#     X = np.array(range(len(df))).reshape(-1, 1)
+#     y = df['Close'].values
     
-    # Train the model
-    model = LinearRegression()
-    model.fit(X, y)
+#     # Train the model
+#     model = LinearRegression()
+#     model.fit(X, y)
     
-    # Predict future prices
-    future_X = np.array(range(len(df), len(df) + forecast_days)).reshape(-1, 1)
-    future_prices = model.predict(future_X)
+#     # Predict future prices
+#     future_X = np.array(range(len(df), len(df) + forecast_days)).reshape(-1, 1)
+#     future_prices = model.predict(future_X)
     
-    # Create a DataFrame for the future data
-    future_dates = pd.date_range(start=df['Date'].iloc[-1], periods=forecast_days + 1, freq='B')[1:]
-    future_df = pd.DataFrame({
-        'Date': future_dates,
-        'Close': future_prices
-    })
+#     # Create a DataFrame for the future data
+#     future_dates = pd.date_range(start=df['Date'].iloc[-1], periods=forecast_days + 1, freq='B')[1:]
+#     future_df = pd.DataFrame({
+#         'Date': future_dates,
+#         'Close': future_prices
+#     })
     
-    # Combine historical and future data
-    combined_df = pd.concat([df, future_df], ignore_index=True)
+#     # Combine historical and future data
+#     combined_df = pd.concat([df, future_df], ignore_index=True)
     
-    return combined_df
+#     return combined_df
 
 def main():
     # App header with title
     st.markdown("# Stock Pattern Scanner(Yahoo Finance)")
-    st.markdown("Identify technical chart patterns with precision")
-
-    st.markdown("---")
     
     # Sidebar configuration
     with st.sidebar:
@@ -1577,63 +1744,41 @@ def main():
         </style>
         """, unsafe_allow_html=True)
 
-        st.markdown("# Scanner Settings")
+        st.markdown("## ⚙️ Scanner Settings")
         
         # Date selection
         st.markdown("### 📅 Date Selection")
-        date_option = st.radio(
-            "Select Date Option",
-            options=["Date Range"],
-            index=0,
-            help="Choose between a date range or a specific trading day"
-        )
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            start_date = st.date_input(
+                "Start Date",
+                value=datetime.date(2023, 1, 1),
+                min_value=datetime.date(1900, 1, 1),
+                max_value=datetime.date(2100, 12, 31)
+            )
+        with col2:
+            end_date = st.date_input(
+                "End Date",
+                value=datetime.date(2024, 1, 1),
+                min_value=datetime.date(1900, 1, 1),
+                max_value=datetime.date(2100, 12, 31)
+            )
 
-        start_date = None
-        end_date = None
-        single_date = None
+        if end_date < start_date:
+            st.error("End Date must be after Start Date.")
+            st.stop()
 
-        if date_option == "Date Range":
-            col1, col2 = st.columns(2)
-            with col1:
-                start_date = st.date_input(
-                    "Start Date",
-                    value=datetime.date(2023, 1, 1),
-                    min_value=datetime.date(1900, 1, 1),
-                    max_value=datetime.date(2100, 12, 31)
-                )
-            with col2:
-                end_date = st.date_input(
-                    "End Date",
-                    value=datetime.date(2024, 1, 1),
-                    min_value=datetime.date(1900, 1, 1),
-                    max_value=datetime.date(2100, 12, 31)
-                )
-            if end_date < start_date:
-                st.error("End Date must be after Start Date.")
-                return
-            # Add to main() before scanning
-            if (end_date - start_date).days < 30:
-                st.error("Date range must be at least 30 days")
-                st.stop()
-                
-            if (end_date - start_date).days > 365 * 3:
-                st.warning("Large date range may impact performance. Consider narrowing your range.")
+        if (end_date - start_date).days < 30:
+            st.error("Date range must be at least 30 days")
+            st.stop()
 
-        # Forecast days input
-        forecast_days = st.number_input(
-            "Forecast Days",
-            min_value=1,
-            max_value=365,
-            value=30,
-            help="Number of days to forecast future prices"
-        )
+        if (end_date - start_date).days > 365 * 3:
+            st.warning("Large date range may impact performance. Consider narrowing your range.")
 
         # Scan button
-        scan_button = st.button("Scan Stocks", use_container_width=True)
-        
-        if date_option == "Date Range":
-            st.info(f"Selected: **{start_date}** to **{end_date}** with **{forecast_days}** forecast days")
-            
+        scan_button = st.button("Scan the Stock", use_container_width=True)
+
     # Main content
     if scan_button:
         cancel_button = st.sidebar.button("Cancel Scan")
@@ -1656,28 +1801,35 @@ def main():
             progress_container = st.empty()
             progress_bar = progress_container.progress(0)
             status_container = st.empty()
+
+            # Simulate progress
+            for i in range(101):
+                time.sleep(0.05)
+                progress_bar.progress(i)
+
+            status_container.write("Task Complete! 🎉")
+
             
             stock_data = []
-            
             for i, symbol in enumerate(stock_symbols):
                 if st.session_state.scan_cancelled:
                     break
 
                 status_container.info(f"Processing {symbol}... ({i+1}/{len(stock_symbols)})")
-                
+
                 try:
-                    df = fetch_stock_data(symbol, start_date, end_date, forecast_days)
+                    df = fetch_stock_data(symbol, start_date, end_date)
                     if df is None or df.empty:
                         continue
                     
                     patterns = {
                         "Head and Shoulders": detect_head_and_shoulders(df),
-                        # "Double Top": detect_double_top(df),
                         "Double Bottom": detect_double_bottom(df),
                         "Cup and Handle": detect_cup_and_handle(df),
                     }
                     
-                    accuracy, precision = evaluate_pattern_detection(df, patterns)
+                    # Calculate per-pattern metrics
+                    pattern_metrics = evaluate_pattern_detection(df, patterns)
                     
                     stock_info = yf.Ticker(symbol).info
                     current_price = stock_info.get('currentPrice', None)
@@ -1685,14 +1837,13 @@ def main():
                     percent_change = ((df['Close'].iloc[-1] - df['Close'].iloc[0]) / df['Close'].iloc[0]) * 100
 
                     stock_data.append({
-                        "Symbol": symbol, 
-                        "Patterns": patterns, 
+                        "Symbol": symbol,
+                        "Patterns": patterns,
+                        "Pattern Metrics": pattern_metrics,  # New field for metrics
                         "Data": df,
                         "Current Price": current_price,
                         "Volume": volume,
                         "Percent Change": percent_change,
-                        "Accuracy": accuracy,
-                        "Precision": precision,
                         "MA": df['MA'].iloc[-1] if 'MA' in df.columns else None,
                         "RSI": df['RSI'].iloc[-1] if 'RSI' in df.columns else None,
                     })
@@ -1735,10 +1886,10 @@ def main():
                     "% Change": stock['Percent Change'],
                     "MA (50)": stock['MA'],
                     "RSI (14)": stock['RSI'],
-                    "Accuracy": stock['Accuracy'],
-                    "Precision": stock['Precision'],
+                    # "Accuracy": stock['Accuracy'],
+                    # "Precision": stock['Precision'],
                     "Head and Shoulders": pattern_counts.get("Head and Shoulders", 0),
-                    "Double Top": pattern_counts.get("Double Top", 0),
+                    # "Double Top": pattern_counts.get("Double Top", 0),
                     "Double Bottom": pattern_counts.get("Double Bottom", 0),
                     "Cup and Handle": pattern_counts.get("Cup and Handle", 0),
                 }
@@ -1749,20 +1900,20 @@ def main():
             
             # Add filters
             col1, col2, col3 = st.columns(3)
+            # with col1:
+            #     min_price = st.number_input("Min Price ($)", min_value=0.0, value=0.0, step=1.0)
+            # with col2:
+            #     min_volume = st.number_input("Min Volume", min_value=0, value=0, step=1000)
             with col1:
-                min_price = st.number_input("Min Price ($)", min_value=0.0, value=0.0, step=1.0)
-            with col2:
-                min_volume = st.number_input("Min Volume", min_value=0, value=0, step=1000)
-            with col3:
                 pattern_filter = st.selectbox("Filter by Pattern", 
-                                             ["All Patterns", "Head and Shoulders", "Double Top", "Double Bottom", "Cup and Handle"])
+                                             ["All Patterns", "Head and Shoulders", "Double Bottom", "Cup and Handle"])
             
             # Apply filters
             filtered_df = df_table.copy()
-            if min_price > 0:
-                filtered_df = filtered_df[filtered_df["Current Price"] >= min_price]
-            if min_volume > 0:
-                filtered_df = filtered_df[filtered_df["Volume"] >= min_volume]
+            # if min_price > 0:
+            #     filtered_df = filtered_df[filtered_df["Current Price"] >= min_price]
+            # if min_volume > 0:
+            #     filtered_df = filtered_df[filtered_df["Volume"] >= min_volume]
             if pattern_filter != "All Patterns":
                 filtered_df = filtered_df[filtered_df[pattern_filter] > 0]
             
@@ -1773,8 +1924,8 @@ def main():
             formatted_df["% Change"] = formatted_df["% Change"].apply(lambda x: f"{x:.2f}%" if pd.notnull(x) else "N/A")
             formatted_df["MA (50)"] = formatted_df["MA (50)"].apply(lambda x: f"{x:.2f}" if pd.notnull(x) else "N/A")
             formatted_df["RSI (14)"] = formatted_df["RSI (14)"].apply(lambda x: f"{x:.2f}" if pd.notnull(x) else "N/A")
-            formatted_df["Accuracy"] = formatted_df["Accuracy"].apply(lambda x: f"{x:.2f}" if pd.notnull(x) else "N/A")
-            formatted_df["Precision"] = formatted_df["Precision"].apply(lambda x: f"{x:.2f}" if pd.notnull(x) else "N/A")
+            # formatted_df["Accuracy"] = formatted_df["Accuracy"].apply(lambda x: f"{x:.2f}" if pd.notnull(x) else "N/A")
+            # formatted_df["Precision"] = formatted_df["Precision"].apply(lambda x: f"{x:.2f}" if pd.notnull(x) else "N/A")
             
             # Display the table with custom styling
             st.dataframe(
@@ -1788,10 +1939,10 @@ def main():
                     "% Change": st.column_config.TextColumn("Change (%)"),
                     "MA (50)": st.column_config.TextColumn("MA (50)"),
                     "RSI (14)": st.column_config.TextColumn("RSI (14)"),
-                    "Accuracy": st.column_config.TextColumn("Accuracy"),
-                    "Precision": st.column_config.TextColumn("Precision"),
+                    # "Accuracy": st.column_config.TextColumn("Accuracy"),
+                    # "Precision": st.column_config.TextColumn("Precision"),
                     "Head and Shoulders": st.column_config.NumberColumn("H&S", format="%d"),
-                    "Double Top": st.column_config.NumberColumn("Double Top", format="%d"),
+                    # "Double Top": st.column_config.NumberColumn("Double Top", format="%d"),
                     "Double Bottom": st.column_config.NumberColumn("Double Bottom", format="%d"),
                     "Cup and Handle": st.column_config.NumberColumn("Cup & Handle", format="%d"),
                 }
@@ -1803,26 +1954,39 @@ def main():
             with col1:
                 st.metric("Total Stocks", len(filtered_df))
             with col2:
-                total_patterns = filtered_df[["Head and Shoulders", "Double Top", "Double Bottom", "Cup and Handle"]].sum().sum()
+                total_patterns = filtered_df[["Head and Shoulders", "Double Bottom", "Cup and Handle"]].sum().sum()
                 st.metric("Total Patterns", int(total_patterns))
-            with col3:
-                avg_accuracy = filtered_df["Accuracy"].mean()
-                st.metric("Avg. Accuracy", f"{avg_accuracy:.2f}")
-            with col4:
-                avg_precision = filtered_df["Precision"].mean()
-                st.metric("Avg. Precision", f"{avg_precision:.2f}")
+            # with col3:
+            #     avg_accuracy = filtered_df["Accuracy"].mean()
+            #     st.metric("Avg. Accuracy", f"{avg_accuracy:.2f}")
+            # with col4:
+            #     avg_precision = filtered_df["Precision"].mean()
+            #     st.metric("Avg. Precision", f"{avg_precision:.2f}")
         
         with tab2:
             st.markdown("### 🔍 Pattern Visualization")
             
-            # Stock selection
+            # Stock selection with pattern counts
             col1, col2 = st.columns(2)
             with col1:
-                selected_stock = st.selectbox(
+                # Create a function to format the stock display name
+                def format_stock_name(stock):
+                    pattern_counts = {
+                        'HS': len(stock['Patterns']['Head and Shoulders']),
+                        'DB': len(stock['Patterns']['Double Bottom']),
+                        'CH': len(stock['Patterns']['Cup and Handle'])
+                    }
+                    return f"{stock['Symbol']} [HS:{pattern_counts['HS']}, DB:{pattern_counts['DB']}, CH:{pattern_counts['CH']}]"
+                
+                # Create the selectbox with formatted names
+                selected_display = st.selectbox(
                     "Select Stock",
-                    options=[stock["Symbol"] for stock in st.session_state.stock_data],
+                    options=[format_stock_name(stock) for stock in st.session_state.stock_data],
                     key='stock_select'
                 )
+                
+                # Extract the symbol from the selected display name
+                selected_stock = selected_display.split(' [')[0]
             
             if selected_stock != st.session_state.selected_stock:
                 st.session_state.selected_stock = selected_stock
@@ -1833,14 +1997,26 @@ def main():
             
             if selected_data:
                 # Pattern selection
-                pattern_options = [p for p, v in selected_data["Patterns"].items() if v]
+                pattern_options = []
+                for pattern_name, patterns in selected_data["Patterns"].items():
+                    if patterns:  # Only include patterns that were detected
+                        count = len(patterns)
+                        display_name = f"{pattern_name} ({count})"
+                        pattern_options.append((pattern_name, display_name))
                 
                 if pattern_options:
                     with col2:
-                        selected_pattern = st.selectbox(
+                        # Show pattern selection with counts
+                        selected_display = st.selectbox(
                             "Select Pattern",
-                            options=pattern_options,
+                            options=[display for _, display in pattern_options],
                             key='pattern_select'
+                        )
+                        
+                        # Get the actual pattern name
+                        selected_pattern = next(
+                            pattern for pattern, display in pattern_options 
+                            if display == selected_display
                         )
                     
                     if selected_pattern != st.session_state.selected_pattern:
@@ -1850,76 +2026,106 @@ def main():
                         pattern_points = selected_data["Patterns"][st.session_state.selected_pattern]
                         
                         # Display stock info
-                        col1, col2, col3, col4 = st.columns(4)
-                        with col1:
-                            st.metric("Current Price", f"${selected_data['Current Price']:.2f}" if selected_data['Current Price'] else "N/A")
-                        with col2:
+                        st.markdown("### 📊 Stock Metrics")
+                        metric_cols = st.columns(4)
+                        with metric_cols[0]:
+                            st.metric(
+                                "Current Price", 
+                                f"${selected_data['Current Price']:.2f}" if selected_data['Current Price'] else "N/A",
+                                f"{selected_data['Percent Change']:.2f}%"
+                            )
+                        with metric_cols[1]:
                             st.metric("Volume", f"{int(selected_data['Volume']):,}" if selected_data['Volume'] else "N/A")
-                        with col3:
-                            st.metric("% Change", f"{selected_data['Percent Change']:.2f}%")
-                        with col4:
+                        with metric_cols[2]:
+                            st.metric("MA (50)", f"{selected_data['MA']:.2f}" if selected_data['MA'] else "N/A")
+                        with metric_cols[3]:
                             st.metric("RSI (14)", f"{selected_data['RSI']:.2f}" if selected_data['RSI'] else "N/A")
                         
                         # Plot the pattern
-                        if not isinstance(pattern_points, list):
-                            pattern_points = [pattern_points]
-                        
-                        st.plotly_chart(
-                            plot_pattern(
-                                selected_data["Data"],
-                                pattern_points,
-                                st.session_state.selected_pattern
-                            ),
-                            use_container_width=True
-                        )
+                        st.markdown("### 📈 Pattern Chart")
+                        if selected_data:
+                            if not isinstance(pattern_points, list):
+                                pattern_points = [pattern_points]
+                            
+                            st.plotly_chart(
+                                plot_pattern(
+                                    selected_data["Data"],
+                                    pattern_points,
+                                    st.session_state.selected_pattern,
+                                    stock_name=selected_data["Symbol"]
+                                ),
+                                use_container_width=True,
+                                height=600
+                            )
+                            
+                            # Display pattern-specific metrics
+                            st.markdown(f"### 📊 Metrics for {st.session_state.selected_pattern}")
+                            metrics = selected_data["Pattern Metrics"][st.session_state.selected_pattern]
+                            metric_cols = st.columns(4)
+                            with metric_cols[0]:
+                                st.metric("Accuracy", f"{metrics['Accuracy']:.2f}")
+                            with metric_cols[1]:
+                                st.metric("Precision", f"{metrics['Precision']:.2f}")
+                            with metric_cols[2]:
+                                st.metric("Recall", f"{metrics['Recall']:.2f}")
+                            with metric_cols[3]:
+                                st.metric("F1 Score", f"{metrics['F1']:.2f}")
                         
                         # Pattern explanation
-                        with st.expander("📚 Pattern Explanation"):
+                        with st.expander("📚 Pattern Details & Trading Guidance"):
                             if selected_pattern == "Head and Shoulders":
                                 st.markdown("""
-                                **Head and Shoulders Pattern**
+                                **Head and Shoulders Pattern (Bearish Reversal)**
                                 
-                                A bearish reversal pattern that signals a potential trend change from bullish to bearish. It consists of:
-                                - Left shoulder: A peak followed by a decline
-                                - Head: A higher peak followed by another decline
-                                - Right shoulder: A lower peak similar to the left shoulder
+                                - **Structure**: Left shoulder (peak) → Head (higher peak) → Right shoulder (lower peak)
+                                - **Neckline**: Support connecting the troughs after left shoulder and head
+                                - **Confirmation**: Price closes below neckline with increased volume
                                 
-                                **Trading Implications**: When the price breaks below the neckline (support level), it often indicates a strong sell signal.
-                                """)
-                            elif selected_pattern == "Double Top":
-                                st.markdown("""
-                                **Double Top Pattern**
-                                
-                                A bearish reversal pattern that forms after an extended upward trend. It consists of:
-                                - Two peaks at approximately the same price level
-                                - A valley (trough) between the peaks
-                                
-                                **Trading Implications**: When the price falls below the valley between the two tops, it signals a potential downtrend.
+                                **Trading Implications**:
+                                1. **Entry**: After neckline breakout (short position)
+                                2. **Price Target**: Neckline price - pattern height
+                                3. **Stop Loss**: Above right shoulder peak
                                 """)
                             elif selected_pattern == "Double Bottom":
                                 st.markdown("""
-                                **Double Bottom Pattern**
+                                **Double Bottom Pattern (Bullish Reversal)**
                                 
-                                A bullish reversal pattern that forms after an extended downward trend. It consists of:
-                                - Two troughs at approximately the same price level
-                                - A peak between the troughs
+                                - **Structure**: Two distinct troughs at similar price levels
+                                - **Confirmation**: Break above resistance (peak between troughs)
                                 
-                                **Trading Implications**: When the price rises above the peak between the two bottoms, it signals a potential uptrend.
+                                **Trading Implications**:
+                                1. **Entry**: After resistance breakout (long position)
+                                2. **Price Target**: Resistance price + pattern height
+                                3. **Stop Loss**: Below second trough
                                 """)
                             elif selected_pattern == "Cup and Handle":
                                 st.markdown("""
-                                **Cup and Handle Pattern**
+                                **Cup and Handle Pattern (Bullish Continuation)**
                                 
-                                A bullish continuation pattern that signals a pause in an uptrend before continuing higher. It consists of:
-                                - Cup: A rounded bottom formation (U-shape)
-                                - Handle: A slight downward drift forming a consolidation
+                                - **Structure**: 
+                                - Cup: Rounded bottom (U-shape) 
+                                - Handle: Small downward drift/pullback
+                                - **Confirmation**: Break above handle resistance
                                 
-                                **Trading Implications**: The pattern completes when the price breaks above the resistance level formed by the cup's rim.
+                                **Trading Implications**:
+                                1. **Entry**: After handle breakout (long position)
+                                2. **Price Target**: Cup height added to breakout point
+                                3. **Stop Loss**: Below handle low
                                 """)
+                            
+                            st.markdown("---")
+                            st.markdown("**Pattern Statistics**")
+                            st.metric("Pattern Confidence", f"{pattern_points[0].get('confidence', 0)*100:.1f}%")
+                            if 'target_price' in pattern_points[0]:
+                                current_price = selected_data['Current Price']
+                                if current_price:
+                                    potential_pct = ((pattern_points[0]['target_price'] - current_price)/current_price)*100
+                                    st.metric("Target Price", 
+                                            f"${pattern_points[0]['target_price']:.2f}",
+                                            f"{potential_pct:.1f}%")
                 else:
                     st.info(f"No patterns detected for {selected_stock}.")
             else:
                 st.error("Selected stock data not found.")
-
 if __name__ == "__main__":
     main()
