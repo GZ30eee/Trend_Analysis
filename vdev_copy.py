@@ -169,152 +169,152 @@ def find_extrema(df, order=5):
     troughs = argrelextrema(df['Close'].values, np.less, order=order)[0]
     return peaks, troughs
 
-def detect_head_and_shoulders(df):
-    prices = df['Close']
-    peaks = argrelextrema(prices.values, np.greater, order=10)[0]
-    patterns = []
+# def detect_head_and_shoulders(df):
+#     prices = df['Close']
+#     peaks = argrelextrema(prices.values, np.greater, order=10)[0]
+#     patterns = []
 
-    for i in range(len(peaks) - 2):
-        LS, H, RS = peaks[i], peaks[i + 1], peaks[i + 2]
+#     for i in range(len(peaks) - 2):
+#         LS, H, RS = peaks[i], peaks[i + 1], peaks[i + 2]
 
-        # Check if the head is higher than the shoulders
-        if prices.iloc[H] > prices.iloc[LS] and prices.iloc[H] > prices.iloc[RS]:
-            # Check if the shoulders are roughly equal (within 5% tolerance)
-            shoulder_diff = abs(prices.iloc[LS] - prices.iloc[RS]) / max(prices.iloc[LS], prices.iloc[RS])
-            if shoulder_diff <= 0.05:  # 5% tolerance
-                # Find neckline (troughs between shoulders and head)
-                T1 = prices.iloc[LS:H + 1].idxmin()  # Trough between left shoulder and head
-                T2 = prices.iloc[H:RS + 1].idxmin()  # Trough between head and right shoulder
-                patterns.append({
-                    "left_shoulder": LS,
-                    "head": H,
-                    "right_shoulder": RS,
-                    "neckline": (T1, T2)
-                })
+#         # Check if the head is higher than the shoulders
+#         if prices.iloc[H] > prices.iloc[LS] and prices.iloc[H] > prices.iloc[RS]:
+#             # Check if the shoulders are roughly equal (within 5% tolerance)
+#             shoulder_diff = abs(prices.iloc[LS] - prices.iloc[RS]) / max(prices.iloc[LS], prices.iloc[RS])
+#             if shoulder_diff <= 0.05:  # 5% tolerance
+#                 # Find neckline (troughs between shoulders and head)
+#                 T1 = prices.iloc[LS:H + 1].idxmin()  # Trough between left shoulder and head
+#                 T2 = prices.iloc[H:RS + 1].idxmin()  # Trough between head and right shoulder
+#                 patterns.append({
+#                     "left_shoulder": LS,
+#                     "head": H,
+#                     "right_shoulder": RS,
+#                     "neckline": (T1, T2)
+#                 })
 
-    return patterns
+#     return patterns
 
 # ================SIR2
-# def find_peaks(data):
-#     """Find all peaks in the close price data with additional smoothing."""
-#     peaks = []
-#     for i in range(2, len(data) - 2):  # Extended window for better peak detection
-#         if (data['Close'].iloc[i] > data['Close'].iloc[i-1] and 
-#             data['Close'].iloc[i] > data['Close'].iloc[i+1] and
-#             data['Close'].iloc[i] > data['Close'].iloc[i-2] and  # Additional checks
-#             data['Close'].iloc[i] > data['Close'].iloc[i+2]):
-#             peaks.append(i)
-#     return peaks
+def find_peaks(data):
+    """Find all peaks in the close price data with additional smoothing."""
+    peaks = []
+    for i in range(2, len(data) - 2):  # Extended window for better peak detection
+        if (data['Close'].iloc[i] > data['Close'].iloc[i-1] and 
+            data['Close'].iloc[i] > data['Close'].iloc[i+1] and
+            data['Close'].iloc[i] > data['Close'].iloc[i-2] and  # Additional checks
+            data['Close'].iloc[i] > data['Close'].iloc[i+2]):
+            peaks.append(i)
+    return peaks
 
-# def find_valleys(data):
-#     """Find all valleys in the close price data with additional smoothing."""
-#     valleys = []
-#     for i in range(2, len(data) - 2):  # Extended window for better valley detection
-#         if (data['Close'].iloc[i] < data['Close'].iloc[i-1] and 
-#             data['Close'].iloc[i] < data['Close'].iloc[i+1] and
-#             data['Close'].iloc[i] < data['Close'].iloc[i-2] and  # Additional checks
-#             data['Close'].iloc[i] < data['Close'].iloc[i+2]):
-#             valleys.append(i)
-#     return valleys
+def find_valleys(data):
+    """Find all valleys in the close price data with additional smoothing."""
+    valleys = []
+    for i in range(2, len(data) - 2):  # Extended window for better valley detection
+        if (data['Close'].iloc[i] < data['Close'].iloc[i-1] and 
+            data['Close'].iloc[i] < data['Close'].iloc[i+1] and
+            data['Close'].iloc[i] < data['Close'].iloc[i-2] and  # Additional checks
+            data['Close'].iloc[i] < data['Close'].iloc[i+2]):
+            valleys.append(i)
+    return valleys
 
-# def detect_head_and_shoulders(data, tolerance=0.03, min_pattern_length=20, volume_ratio=1.2):
-#     """
-#     Enhanced Head & Shoulders detection with:
-#     - Volume analysis
-#     - Trend confirmation
-#     - Neckline validation
-#     - Breakout confirmation
-#     """
-#     peaks = find_peaks(data)
-#     valleys = find_valleys(data)
-#     patterns = []
+def detect_head_and_shoulders(data, tolerance=0.03, min_pattern_length=20, volume_ratio=1.2):
+    """
+    Enhanced Head & Shoulders detection with:
+    - Volume analysis
+    - Trend confirmation
+    - Neckline validation
+    - Breakout confirmation
+    """
+    peaks = find_peaks(data)
+    valleys = find_valleys(data)
+    patterns = []
     
-#     for i in range(len(peaks) - 2):
-#         LS, H, RS = peaks[i], peaks[i+1], peaks[i+2]
+    for i in range(len(peaks) - 2):
+        LS, H, RS = peaks[i], peaks[i+1], peaks[i+2]
         
-#         # 1. Basic structure validation
-#         if not (data['Close'].iloc[LS] < data['Close'].iloc[H] > data['Close'].iloc[RS]):
-#             continue
+        # 1. Basic structure validation
+        if not (data['Close'].iloc[LS] < data['Close'].iloc[H] > data['Close'].iloc[RS]):
+            continue
             
-#         # 2. Shoulder symmetry (price)
-#         shoulder_diff = abs(data['Close'].iloc[LS] - data['Close'].iloc[RS]) / max(data['Close'].iloc[LS], data['Close'].iloc[RS])
-#         if shoulder_diff > tolerance:
-#             continue
+        # 2. Shoulder symmetry (price)
+        shoulder_diff = abs(data['Close'].iloc[LS] - data['Close'].iloc[RS]) / max(data['Close'].iloc[LS], data['Close'].iloc[RS])
+        if shoulder_diff > tolerance:
+            continue
             
-#         # 3. Time symmetry
-#         time_diff = abs((H - LS) - (RS - H)) / max(H - LS, RS - H)
-#         if time_diff > 0.3:  # Allow 30% time difference
-#             continue
+        # 3. Time symmetry
+        time_diff = abs((H - LS) - (RS - H)) / max(H - LS, RS - H)
+        if time_diff > 0.3:  # Allow 30% time difference
+            continue
             
-#         # 4. Minimum pattern duration
-#         if (RS - LS) < min_pattern_length:
-#             continue
+        # 4. Minimum pattern duration
+        if (RS - LS) < min_pattern_length:
+            continue
             
-#         # 5. Neckline points
-#         valley1 = min([v for v in valleys if LS < v < H], key=lambda x: data['Close'].iloc[x], default=None)
-#         valley2 = min([v for v in valleys if H < v < RS], key=lambda x: data['Close'].iloc[x], default=None)
-#         if not valley1 or not valley2:
-#             continue
+        # 5. Neckline points
+        valley1 = min([v for v in valleys if LS < v < H], key=lambda x: data['Close'].iloc[x], default=None)
+        valley2 = min([v for v in valleys if H < v < RS], key=lambda x: data['Close'].iloc[x], default=None)
+        if not valley1 or not valley2:
+            continue
             
-#         # 6. Neckline slope validation
-#         neckline_slope = (data['Close'].iloc[valley2] - data['Close'].iloc[valley1]) / (valley2 - valley1)
-#         if abs(neckline_slope) > 0.001:  # Filter steep necklines
-#             continue
+        # 6. Neckline slope validation
+        neckline_slope = (data['Close'].iloc[valley2] - data['Close'].iloc[valley1]) / (valley2 - valley1)
+        if abs(neckline_slope) > 0.001:  # Filter steep necklines
+            continue
             
-#         # 7. Volume analysis
-#         # Left shoulder advance volume
-#         left_advance_vol = data['Volume'].iloc[valley1+1:H+1].mean()
-#         # Right shoulder advance volume
-#         right_advance_vol = data['Volume'].iloc[valley2+1:RS+1].mean()
-#         # Head advance volume
-#         head_advance_vol = data['Volume'].iloc[valley1+1:H+1].mean()
+        # 7. Volume analysis
+        # Left shoulder advance volume
+        left_advance_vol = data['Volume'].iloc[valley1+1:H+1].mean()
+        # Right shoulder advance volume
+        right_advance_vol = data['Volume'].iloc[valley2+1:RS+1].mean()
+        # Head advance volume
+        head_advance_vol = data['Volume'].iloc[valley1+1:H+1].mean()
         
-#         if not (head_advance_vol > left_advance_vol * volume_ratio and 
-#                 right_advance_vol < head_advance_vol):
-#             continue
+        if not (head_advance_vol > left_advance_vol * volume_ratio and 
+                right_advance_vol < head_advance_vol):
+            continue
             
-#         # 8. Prior uptrend validation
-#         lookback = (RS - LS) // 2
-#         X = np.arange(max(0, LS-lookback), LS).reshape(-1, 1)
-#         y = data['Close'].iloc[max(0, LS-lookback):LS]
-#         if LinearRegression().fit(X, y).coef_[0] <= 0:
-#             continue
+        # 8. Prior uptrend validation
+        lookback = (RS - LS) // 2
+        X = np.arange(max(0, LS-lookback), LS).reshape(-1, 1)
+        y = data['Close'].iloc[max(0, LS-lookback):LS]
+        if LinearRegression().fit(X, y).coef_[0] <= 0:
+            continue
             
-#         # 9. Breakout confirmation
-#         neckline_at_break = data['Close'].iloc[valley1] + neckline_slope * (RS - valley1)
-#         breakout_confirmed = False
-#         breakout_idx = None
+        # 9. Breakout confirmation
+        neckline_at_break = data['Close'].iloc[valley1] + neckline_slope * (RS - valley1)
+        breakout_confirmed = False
+        breakout_idx = None
         
-#         for j in range(RS, min(RS + 20, len(data) - 2)):  # Check next 20 candles
-#             if all(data['Close'].iloc[j+k] < neckline_at_break for k in range(3)):  # 3 consecutive closes
-#                 breakout_confirmed = True
-#                 breakout_idx = j + 2
-#                 break
+        for j in range(RS, min(RS + 20, len(data) - 2)):  # Check next 20 candles
+            if all(data['Close'].iloc[j+k] < neckline_at_break for k in range(3)):  # 3 consecutive closes
+                breakout_confirmed = True
+                breakout_idx = j + 2
+                break
                 
-#         if not breakout_confirmed:
-#             continue
+        if not breakout_confirmed:
+            continue
             
-#         # 10. Breakout volume check
-#         if data['Volume'].iloc[breakout_idx] < data['Volume'].iloc[RS] * 0.8:  # Should have decent volume
-#             continue
+        # 10. Breakout volume check
+        if data['Volume'].iloc[breakout_idx] < data['Volume'].iloc[RS] * 0.8:  # Should have decent volume
+            continue
             
-#         # Calculate pattern metrics
-#         pattern_height = data['Close'].iloc[H] - neckline_at_break
-#         target_price = neckline_at_break - pattern_height
+        # Calculate pattern metrics
+        pattern_height = data['Close'].iloc[H] - neckline_at_break
+        target_price = neckline_at_break - pattern_height
         
-#         patterns.append({
-#             'left_shoulder': data.index[LS],
-#             'head': data.index[H],
-#             'right_shoulder': data.index[RS],
-#             'neckline_points': (data.index[valley1], data.index[valley2]),
-#             'neckline_price': neckline_at_break,
-#             'breakout_point': data.index[breakout_idx],
-#             'target_price': target_price,
-#             'pattern_height': pattern_height,
-#             'confidence': min(0.99, (1 - shoulder_diff) * (1 - time_diff))
-#         })
+        patterns.append({
+            'left_shoulder': data.index[LS],
+            'head': data.index[H],
+            'right_shoulder': data.index[RS],
+            'neckline_points': (data.index[valley1], data.index[valley2]),
+            'neckline_price': neckline_at_break,
+            'breakout_point': data.index[breakout_idx],
+            'target_price': target_price,
+            'pattern_height': pattern_height,
+            'confidence': min(0.99, (1 - shoulder_diff) * (1 - time_diff))
+        })
     
-#     return sorted(patterns, key=lambda x: -x['confidence'])  # Return sorted by confidence
+    return sorted(patterns, key=lambda x: -x['confidence'])  # Return sorted by confidence
 
 def plot_head_and_shoulders(df, patterns):
     fig = make_subplots(
