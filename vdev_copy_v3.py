@@ -545,11 +545,32 @@ def plot_double_bottom(df, pattern_points, stock_name=""):
         color = '#E91E63'  # Consistent color for simplicity
 
         # Key points
-        trough1_date = df['Date'].iloc[pattern['trough1']]
-        trough2_date = df['Date'].iloc[pattern['trough2']]
-        neckline_date = df['Date'].iloc[pattern['neckline']]
+        trough1_idx = pattern['trough1']
+        trough2_idx = pattern['trough2']
+        neckline_idx = pattern['neckline']
+        trough1_date = df['Date'].iloc[trough1_idx]
+        trough2_date = df['Date'].iloc[trough2_idx]
+        neckline_date = df['Date'].iloc[neckline_idx]
         neckline_price = pattern['neckline_price']
         breakout_date = df['Date'].iloc[pattern['breakout']] if pattern['breakout'] else None
+
+        # Find the peak between the two troughs
+        start_idx = trough1_idx
+        end_idx = trough2_idx
+        segment = df.iloc[start_idx:end_idx+1]
+        peak_idx = segment['Close'].idxmax()
+        peak_date = df['Date'].iloc[peak_idx]
+        peak_price = df['Close'].iloc[peak_idx]
+
+        # Plot the W formation (connecting lines)
+        fig.add_trace(go.Scatter(
+            x=[trough1_date, peak_date, trough2_date],
+            y=[pattern['trough_prices'][0], peak_price, pattern['trough_prices'][1]],
+            mode='lines',
+            line=dict(color=color, width=2),
+            name=f'W Formation ({idx+1})',
+            showlegend=False
+        ), row=1, col=1)
 
         # Plot troughs
         fig.add_trace(go.Scatter(x=[trough1_date], y=[pattern['trough_prices'][0]], mode="markers+text",
@@ -559,9 +580,16 @@ def plot_double_bottom(df, pattern_points, stock_name=""):
                                 text=["B2"], textposition="bottom center", marker=dict(size=12, color=color),
                                 name=f"Bottom 2 ({idx+1})"), row=1, col=1)
 
-        # Plot neckline
-        fig.add_trace(go.Scatter(x=[trough1_date, trough2_date], y=[neckline_price, neckline_price], mode="lines",
-                                line=dict(color=color, dash='dash'), name=f"Neckline ({idx+1})"), row=1, col=1)
+        # Plot neckline (extended)
+        neckline_start_date = df['Date'].iloc[max(0, trough1_idx - 5)]  # Extend left
+        neckline_end_date = df['Date'].iloc[min(len(df)-1, trough2_idx + 5)]  # Extend right
+        fig.add_trace(go.Scatter(
+            x=[neckline_start_date, neckline_end_date], 
+            y=[neckline_price, neckline_price], 
+            mode="lines",
+            line=dict(color=color, dash='dash'), 
+            name=f"Neckline ({idx+1})"
+        ), row=1, col=1)
 
         # Plot breakout and target
         if breakout_date:
@@ -576,9 +604,20 @@ def plot_double_bottom(df, pattern_points, stock_name=""):
     fig.add_trace(go.Bar(x=df['Date'], y=df['Volume'], name="Volume", marker=dict(color='#26A69A', opacity=0.7)),
                   row=2, col=1)
 
-    fig.update_layout(title=f"Double Bottom Patterns for {stock_name}", height=800, template='plotly_white')
+    fig.update_layout(
+        title=f"Double Bottom Patterns for {stock_name}", 
+        height=800, 
+        template='plotly_white',
+        legend=dict(
+            orientation="v",
+            yanchor="top",
+            y=1,
+            xanchor="right",
+            x=1.1
+        )
+    )
     return fig
-
+    
 def detect_cup_and_handle(df, order=10, cup_min_bars=20, handle_max_retrace=0.5):
     """
     Detect Cup and Handle patterns with relaxed constraints for better detection.
