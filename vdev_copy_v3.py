@@ -1842,6 +1842,7 @@ def get_nearest_trading_day(date):
 
 import streamlit as st
 import datetime
+from st_aggrid import AgGrid, GridOptionsBuilder
 
 def main():
     # App header with title
@@ -2058,8 +2059,8 @@ def display_results():
                 "Current Price": stock['Current Price'] if stock['Current Price'] else None,
                 "Volume": stock['Volume'] if stock['Volume'] else None,
                 "% Change": stock['Percent Change'],
-                "MA (50)": stock['MA'],
-                "RSI (14)": stock['RSI'],
+                # "MA (50)": stock['MA'],
+                # "RSI (14)": stock['RSI'],
                 "Head and Shoulders": pattern_counts.get("Head and Shoulders", 0),
                 "Double Bottom": pattern_counts.get("Double Bottom", 0),
                 "Cup and Handle": pattern_counts.get("Cup and Handle", 0),
@@ -2083,39 +2084,73 @@ def display_results():
         
         # Format the table
         formatted_df = filtered_df.copy()
-        formatted_df["Current Price"] = formatted_df["Current Price"].apply(
-            lambda x: f"${x:.2f}" if pd.notnull(x) else "N/A"
+        formatted_df["Current Price"] = formatted_df.apply(
+            lambda row: f"₹{row['Current Price']:.2f}" if row["Symbol"].endswith(".NS") else f"${row['Current Price']:.2f}",
+            axis=1
         )
+
         formatted_df["Volume"] = formatted_df["Volume"].apply(
             lambda x: f"{int(x):,}" if pd.notnull(x) else "N/A"
         )
         formatted_df["% Change"] = formatted_df["% Change"].apply(
             lambda x: f"{x:.2f}%" if pd.notnull(x) else "N/A"
         )
-        formatted_df["MA (50)"] = formatted_df["MA (50)"].apply(
-            lambda x: f"{x:.2f}" if pd.notnull(x) else "N/A"
-        )
-        formatted_df["RSI (14)"] = formatted_df["RSI (14)"].apply(
-            lambda x: f"{x:.2f}" if pd.notnull(x) else "N/A"
-        )
+        # formatted_df["MA (50)"] = formatted_df["MA (50)"].apply(
+        #     lambda x: f"{x:.2f}" if pd.notnull(x) else "N/A"
+        # )
+        # formatted_df["RSI (14)"] = formatted_df["RSI (14)"].apply(
+        #     lambda x: f"{x:.2f}" if pd.notnull(x) else "N/A"
+        # )
         
         # Display the table
-        st.dataframe(
-            formatted_df,
-            height=500,
-            use_container_width=True,
-            column_config={
-                "Symbol": st.column_config.TextColumn("Symbol"),
-                "Current Price": st.column_config.TextColumn("Price"),
-                "Volume": st.column_config.TextColumn("Volume"),
-                "% Change": st.column_config.TextColumn("Change (%)"),
-                "MA (50)": st.column_config.TextColumn("MA (50)"),
-                "RSI (14)": st.column_config.TextColumn("RSI (14)"),
-                "Head and Shoulders": st.column_config.NumberColumn("H&S", format="%d"),
-                "Double Bottom": st.column_config.NumberColumn("Double Bottom", format="%d"),
-                "Cup and Handle": st.column_config.NumberColumn("Cup & Handle", format="%d"),
+        st.markdown(
+            """
+            <style>
+            [data-testid="stTable"] td, [data-testid="stTable"] th {
+                text-align: center !important;
             }
+            </style>
+            """,
+            unsafe_allow_html=True
         )
+
+        # Sample formatted_df (Replace this with your actual dataframe)
+        # formatted_df = pd.DataFrame([...])
+
+        # Configure AgGrid for better control
+        gb = GridOptionsBuilder.from_dataframe(formatted_df)
+
+        # Set default column properties
+        gb.configure_default_column(
+            cellStyle={'textAlign': 'center', 'verticalAlign': 'middle'},  # Center-align text
+            wrapText=True,  # Enable text wrapping
+            resizable=True,  # Allow resizing columns
+            sortable=True,  # Enable sorting
+            filter=True  # Enable filtering
+        )
+
+        # Custom column widths (optional)
+        gb.configure_column("Symbol", width=100)
+        gb.configure_column("Current Price", width=120)
+        gb.configure_column("Volume", width=120)
+        gb.configure_column("% Change", width=120)
+        gb.configure_column("Head and Shoulders", width=150)
+        gb.configure_column("Double Bottom", width=150)
+        gb.configure_column("Cup and Handle", width=150)
+
+        # Enable hover effects
+        grid_options = gb.build()
+        grid_options['rowStyle'] = {'cursor': 'pointer'}  # Makes rows hoverable
+
+        # Display AgGrid with the formatted dataframe
+        AgGrid(
+            formatted_df, 
+            gridOptions=grid_options, 
+            height=500, 
+            fit_columns_on_grid_load=True
+        )
+
+
         
         # Show summary stats
         st.markdown("### 📊 Summary Statistics")
@@ -2126,8 +2161,8 @@ def display_results():
             total_patterns = filtered_df[["Head and Shoulders", "Double Bottom", "Cup and Handle"]].sum().sum()
             st.metric("Total Patterns", int(total_patterns))
     
+    # In the display_results() function, under tab2:
     with tab2:
-        # Pattern visualization code remains the same as before
         st.markdown("### 🔍 Pattern Visualization")
         
         col1, col2 = st.columns(2)
@@ -2185,15 +2220,16 @@ def display_results():
                     st.markdown("### 📊 Stock Metrics")
                     metric_cols = st.columns(4)
                     with metric_cols[0]:
-                        st.metric(
-                            "Current Price", 
-                            f"${selected_data['Current Price']:.2f}" if selected_data['Current Price'] else "N/A",
-                            f"{selected_data['Percent Change']:.2f}%"
-                        )
+                        price_prefix = "₹" if selected_data["Symbol"].endswith(".NS") else "$"
+                        price_value = f"{price_prefix}{selected_data['Current Price']:.2f}" if selected_data['Current Price'] else "N/A"
+                        change_value = f"{selected_data['Percent Change']:.2f}%" if selected_data['Percent Change'] else "N/A"
+                        st.metric("Current Price", price_value, change_value)
                     with metric_cols[1]:
                         st.metric("Volume", f"{int(selected_data['Volume']):,}" if selected_data['Volume'] else "N/A")
                     with metric_cols[2]:
-                        st.metric("MA (50)", f"{selected_data['MA']:.2f}" if selected_data['MA'] else "N/A")
+                        ma_prefix = "₹" if selected_data["Symbol"].endswith(".NS") else "$"
+                        ma_value = f"{ma_prefix}{selected_data['MA']:.2f}" if selected_data['MA'] else "N/A"
+                        st.metric("MA (50)", ma_value)
                     with metric_cols[3]:
                         st.metric("RSI (14)", f"{selected_data['RSI']:.2f}" if selected_data['RSI'] else "N/A")
                     
@@ -2212,7 +2248,7 @@ def display_results():
                         height=600
                     )
                     
-                    # Add pattern details
+                    # Rest of the pattern details code remains unchanged
                     with st.expander("📚 Pattern Details"):
                         if st.session_state.selected_pattern == "Head and Shoulders":
                             st.markdown("""
@@ -2239,6 +2275,5 @@ def display_results():
                 st.info(f"No patterns detected for {selected_stock}.")
         else:
             st.error("Selected stock data not found.")
-
 if __name__ == "__main__":
     main()
