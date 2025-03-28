@@ -134,9 +134,7 @@ def train_lstm_model(_X_train, _y_train, epochs=20, batch_size=32):
     model = StockLSTM().to(device)
     criterion = nn.BCELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    model = StockLSTM().to(device)
-    criterion = nn.BCELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    
     
     dataset = torch.utils.data.TensorDataset(_X_train, _y_train)
     loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
