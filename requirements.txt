@@ -8,4 +8,4 @@ tqdm
 scikit-learn
 datetime
 streamlit-aggrid
-tourch
+torch
