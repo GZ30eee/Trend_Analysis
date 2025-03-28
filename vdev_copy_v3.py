@@ -120,37 +120,51 @@ class StockLSTM(nn.Module):
 
 @st.cache_resource
 def train_lstm_model(_X_train, _y_train, epochs=20, batch_size=32):
-    """
-    Train a PyTorch LSTM model for price direction prediction.
+    # Initialize CUDA if available
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.init()
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
     
-    Args:
-        _X_train (torch.Tensor): Training input sequences (unhashed).
-        _y_train (torch.Tensor): Training labels (unhashed).
-        epochs (int): Number of training epochs.
-        batch_size (int): Batch size for training.
+    # Debug info
+    st.write(f"Training on: {device}")
     
-    Returns:
-        model: Trained PyTorch LSTM model.
-    """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = StockLSTM().to(device)
-    criterion = nn.BCELoss()  # Binary Cross-Entropy Loss
+    criterion = nn.BCELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    model = StockLSTM().to(device)
+    criterion = nn.BCELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     
-    # Create DataLoader
     dataset = torch.utils.data.TensorDataset(_X_train, _y_train)
     loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
     
+    # Add Streamlit progress elements
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    epoch_bar = st.progress(0)
+    
     model.train()
     for epoch in range(epochs):
-        for X_batch, y_batch in loader:
+        epoch_loss = 0.0
+        status_text.text(f"Epoch {epoch+1}/{epochs} (Running...)")
+        
+        for batch_idx, (X_batch, y_batch) in enumerate(loader):
             X_batch, y_batch = X_batch.to(device), y_batch.to(device)
             optimizer.zero_grad()
             outputs = model(X_batch)
             loss = criterion(outputs, y_batch)
             loss.backward()
             optimizer.step()
-        print(f"Epoch {epoch+1}/{epochs}, Loss: {loss.item():.4f}")
+            
+            epoch_loss += loss.item()
+            progress_bar.progress((batch_idx + 1) / len(loader))
+        
+        avg_loss = epoch_loss / len(loader)
+        status_text.text(f"Epoch {epoch+1}/{epochs} | Loss: {avg_loss:.4f}")
+        epoch_bar.progress((epoch + 1) / epochs)
     
     return model
 
