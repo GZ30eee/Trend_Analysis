@@ -1,7 +1,7 @@
+import os
+os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"  # Disable file watcher
 
 import streamlit as st
-st.set_option('server.fileWatcherType', 'none')
-
 import pandas as pd
 import numpy as np
 import yfinance as yf
